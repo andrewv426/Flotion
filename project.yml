@@ -1,0 +1,65 @@
+name: Flotion
+options:
+  bundleIdPrefix: app.flotion
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
+    ENABLE_HARDENED_RUNTIME: NO
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+packages:
+  FlotionKit:
+    path: Packages/FlotionKit
+targets:
+  Flotion:
+    type: application
+    platform: macOS
+    sources:
+      - App
+    dependencies:
+      - package: FlotionKit
+        product: FlotionCore
+      - package: FlotionKit
+        product: FlotionEditor
+      - package: FlotionKit
+        product: FlotionAI
+      - target: flotion-mcp
+        embed: true
+        link: false
+        codeSign: true
+        copy:
+          destination: executables
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.flotion.Flotion
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Flotion
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+  flotion-mcp:
+    type: tool
+    platform: macOS
+    sources:
+      - Packages/FlotionKit/Sources/flotion-mcp
+    dependencies:
+      - package: FlotionKit
+        product: FlotionMCP
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.flotion.mcp
+        SKIP_INSTALL: YES
+schemes:
+  Flotion:
+    build:
+      targets:
+        Flotion: all
+    run:
+      config: Debug
