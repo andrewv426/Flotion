@@ -11,6 +11,7 @@ let package = Package(
     products: [
         .library(name: "FlotionCore", targets: ["FlotionCore"]),
         .library(name: "FlotionMCP", targets: ["FlotionMCP"]),
+        .library(name: "FlotionEditor", targets: ["FlotionEditor"]),
         .executable(name: "flotion-mcp", targets: ["flotion-mcp"]),
     ],
     dependencies: [
@@ -58,6 +59,16 @@ let package = Package(
         .testTarget(
             name: "FlotionPerfTests",
             dependencies: ["FlotionCore", "FlotionTestSupport", "flotion-mcp"],
+            swiftSettings: strict
+        ),
+        .target(
+            name: "FlotionEditor",
+            dependencies: ["FlotionCore"],
+            swiftSettings: strict
+        ),
+        .testTarget(
+            name: "FlotionEditorTests",
+            dependencies: ["FlotionCore", "FlotionEditor"],
             swiftSettings: strict
         ),
     ],
