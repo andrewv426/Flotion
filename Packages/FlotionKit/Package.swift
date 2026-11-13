@@ -54,6 +54,12 @@ let package = Package(
             dependencies: ["FlotionCore", "FlotionMCP", "FlotionTestSupport", "flotion-mcp", .product(name: "MCP", package: "swift-sdk")],
             swiftSettings: strict
         ),
+        // Budget tests: public API only, run with `swift test -c release`.
+        .testTarget(
+            name: "FlotionPerfTests",
+            dependencies: ["FlotionCore", "FlotionTestSupport", "flotion-mcp"],
+            swiftSettings: strict
+        ),
     ],
     swiftLanguageModes: [.v6]
 )
