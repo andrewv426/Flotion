@@ -10,11 +10,15 @@ let package = Package(
     platforms: [.macOS(.v15)],
     products: [
         .library(name: "FlotionCore", targets: ["FlotionCore"]),
+        .library(name: "FlotionMCP", targets: ["FlotionMCP"]),
+        .executable(name: "flotion-mcp", targets: ["flotion-mcp"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift", exact: "7.12.0"),
         // swift-markdown publishes toolchain-matched tags rather than semver.
         .package(url: "https://github.com/swiftlang/swift-markdown", revision: "swift-6.3.2-RELEASE"),
+        .package(url: "https://github.com/modelcontextprotocol/swift-sdk", exact: "0.12.1"),
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
     ],
     targets: [
         .target(
@@ -28,6 +32,26 @@ let package = Package(
         .testTarget(
             name: "FlotionCoreTests",
             dependencies: ["FlotionCore"],
+            swiftSettings: strict
+        ),
+        .target(
+            name: "FlotionMCP",
+            dependencies: ["FlotionCore", .product(name: "MCP", package: "swift-sdk"), .product(name: "Logging", package: "swift-log")],
+            swiftSettings: strict
+        ),
+        .executableTarget(
+            name: "flotion-mcp",
+            dependencies: ["FlotionMCP"],
+            swiftSettings: strict
+        ),
+        // Drives a real flotion-mcp process over stdio; shared by contract and budget tests.
+        .target(
+            name: "FlotionTestSupport",
+            swiftSettings: strict
+        ),
+        .testTarget(
+            name: "FlotionMCPTests",
+            dependencies: ["FlotionCore", "FlotionMCP", "FlotionTestSupport", "flotion-mcp", .product(name: "MCP", package: "swift-sdk")],
             swiftSettings: strict
         ),
     ],
