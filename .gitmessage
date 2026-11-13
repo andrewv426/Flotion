@@ -1,0 +1,23 @@
+
+# type(scope): summary in the imperative, 72 characters at most, no full stop
+#
+# Body (optional): why the change was needed and what it does, wrapped at 72.
+# Say what a reader of the diff could not work out alone. For perf commits,
+# quote the PERF line before and after.
+#
+# Types
+#   feat      a capability a user or an MCP client can now see
+#   bug       a fix for behaviour that was wrong
+#   perf      faster or lighter, same behaviour
+#   refactor  restructuring with no behaviour change
+#   test      tests, fixtures or the verify gate only
+#   docs      documentation and templates only
+#   build     project config, dependencies, build scripts
+#   chore     anything else that does not touch shipped code
+#
+# Scopes (optional): core, mcp, editor, ai, app, diagrams
+#
+# One logical change per commit. Each commit should build and pass
+# ./Scripts/verify.sh --no-app on its own.
+#
+# Enable this template once per clone:  git config commit.template .gitmessage
