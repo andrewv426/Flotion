@@ -2,6 +2,7 @@
 import AppKit
 import FlotionAI
 import FlotionCore
+import FlotionEditor
 import WebKit
 
 /// An in-process UI smoke test, run with `FLOTION_SELFTEST=<output dir>`.
@@ -241,6 +242,45 @@ enum SelfTest {
             } else {
                 check(false, "the 'Last line' block is on screen for the inline edit test")
             }
+        }
+
+        // The slash menu: the caret stays in the line, typing filters, arrows move, Return picks, Esc keeps the text.
+        await model.newPage()
+        await pause(400)
+        key(newline)
+        if let tv = responder(), !tv.isTitle, let controller = tv.controller {
+            type("/")
+            check(controller.slashMenu != nil, "typing / on an empty line opens the slash menu")
+            check(controller.slashMenu?.session.matches.count == SlashMenu.blockCommands.count + 1, "the menu lists Ask AI and every block type")
+            check(responder() === tv, "the caret stays in the line while the menu is open")
+            await pause(300)
+            if let view = controller.slashMenu?.window.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                view.cacheDisplay(in: view.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: output.appendingPathComponent("11-slash-menu.png"))
+            }
+            type("head")
+            check(controller.slashMenu?.session.matches.map(\.title) == ["Heading 1", "Heading 2", "Heading 3"],
+                  "typing after / filters the menu, got \(controller.slashMenu?.session.matches.map(\.title) ?? [])")
+            key(#selector(NSResponder.moveDown(_:)))
+            check(controller.slashMenu?.session.selectedCommand?.title == "Heading 2", "Down moves the highlight")
+            await pause(300)
+            if let view = controller.slashMenu?.window.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                view.cacheDisplay(in: view.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: output.appendingPathComponent("12-slash-menu-filtered.png"))
+            }
+            key(newline)
+            let first = model.editor?.blocks.first
+            check(controller.slashMenu == nil && first?.type == .heading2 && first?.plainText == "",
+                  "Return turns the line into the highlighted type and removes /head, got \(first?.type.rawValue ?? "nil") '\(first?.plainText ?? "")'")
+            type("Plan ")
+            type("/")
+            check(controller.slashMenu != nil, "/ after a space opens the menu mid-line")
+            key(#selector(NSResponder.cancelOperation(_:)))
+            check(controller.slashMenu == nil && responder()?.string == "Plan /", "Esc closes the menu and keeps the text")
+            type("and/")
+            check(controller.slashMenu == nil, "a / inside a word, as in and/or, does not open the menu")
+        } else {
+            check(false, "a new page has an empty line to type / into")
         }
 
         // Quick find
