@@ -64,6 +64,6 @@ docs/architecture.md        how the pieces fit, with a diagram
 | `./Scripts/verify.sh --ui` | The above, plus the in-app smoke test and in-app budgets |
 | `./Scripts/verify.sh --live-ai` | The above, plus one request to the real, signed-in Claude Code |
 
-The in-app tests type through the real text views and render the window to PNG files in `.build/selftest/`, so they need no accessibility or screen-recording permission.
+The in-app tests type through the real text views and render the window to PNG files in `.build/selftest/`, so they need no accessibility or screen-recording permission. They run in the background: no Dock icon, no visible window, never taking focus, and with their own preferences. Checks that need keyboard focus are listed as `skip`; run `FLOTION_FOREGROUND=1 Scripts/selftest.sh` to watch the run and include them.
 
 See [docs/architecture.md](docs/architecture.md) for the design and [CONTRIBUTING.md](CONTRIBUTING.md) for commit and pull request conventions.
