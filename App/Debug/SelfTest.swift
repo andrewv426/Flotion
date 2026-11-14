@@ -257,7 +257,11 @@ enum SelfTest {
                     isARepeat: false, keyCode: 36) else { return }
                 w.sendEvent(event)
             }
-            if let field = findField(window()?.contentView, placeholder: "Ask, or say what to change…"), window()?.makeFirstResponder(field) == true,
+            // SwiftUI only routes key presses to a focused field while the app is active. A test run
+            // that does not have focus (the user is working in another app) cannot check this.
+            if !NSApp.isActive {
+                log.append("skip Shift-Return in the chat composer: needs keyboard focus; run FLOTION_FOREGROUND=1 Scripts/selftest.sh")
+            } else if let field = findField(window()?.contentView, placeholder: "Ask, or say what to change…"), window()?.makeFirstResponder(field) == true,
                let editor = window()?.firstResponder as? NSTextView {
                 let sent = ai.chat.messages.count
                 editor.insertText("line one", replacementRange: editor.selectedRange())
