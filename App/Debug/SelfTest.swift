@@ -241,6 +241,39 @@ enum SelfTest {
             } else {
                 check(false, "the 'Last line' block is on screen for the inline edit test")
             }
+
+            // The chat composer: Shift-Return breaks the line, Return sends.
+            // SwiftUI keeps its accessibility identifier off the AppKit view, so find the field by its hint.
+            func findField(_ view: NSView?, placeholder: String) -> NSTextField? {
+                guard let view else { return nil }
+                if let field = view as? NSTextField, field.isEditable, field.placeholderString == placeholder { return field }
+                for sub in view.subviews { if let found = findField(sub, placeholder: placeholder) { return found } }
+                return nil
+            }
+            func pressReturn(shift: Bool) {
+                guard let w = window(), let event = NSEvent.keyEvent(
+                    with: .keyDown, location: .zero, modifierFlags: shift ? .shift : [], timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: w.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r",
+                    isARepeat: false, keyCode: 36) else { return }
+                w.sendEvent(event)
+            }
+            if let field = findField(window()?.contentView, placeholder: "Ask, or say what to change…"), window()?.makeFirstResponder(field) == true,
+               let editor = window()?.firstResponder as? NSTextView {
+                let sent = ai.chat.messages.count
+                editor.insertText("line one", replacementRange: editor.selectedRange())
+                pressReturn(shift: true)
+                editor.insertText("line two", replacementRange: editor.selectedRange())
+                await pause()
+                check(editor.string == "line one\nline two", "Shift-Return in the chat composer adds a line break, got \(editor.string.debugDescription)")
+                check(ai.chat.messages.count == sent, "Shift-Return does not send the message")
+                snapshot("10-composer-two-lines")
+                pressReturn(shift: false)
+                await waitFor { !ai.chat.isRunning && ai.chat.messages.count == sent + 2 }
+                check(ai.chat.messages.count == sent + 2 && ai.chat.messages[sent].text == "line one\nline two",
+                      "Return sends both lines as one message")
+            } else {
+                check(false, "the chat composer can take focus")
+            }
         }
 
         // Quick find
