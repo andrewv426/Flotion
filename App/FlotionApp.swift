@@ -4,6 +4,18 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var model: AppModel?
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        #if DEBUG || SELFTEST
+        TestHost.willFinishLaunching()
+        #endif
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        #if DEBUG || SELFTEST
+        TestHost.didFinishLaunching()
+        #endif
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         model?.flushNow()
     }

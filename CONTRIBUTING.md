@@ -4,7 +4,7 @@
 
 ```bash
 ./Scripts/verify.sh          # package build, all tests, data-layer and MCP budgets, app build
-./Scripts/verify.sh --ui     # also the in-app smoke test and in-app budgets (opens the app briefly)
+./Scripts/verify.sh --ui     # also the in-app smoke test and in-app budgets (in the background)
 ```
 
 Warnings are errors in every target, and the budget tests fail the run when a limit is exceeded.

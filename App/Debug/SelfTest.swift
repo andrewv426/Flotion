@@ -20,6 +20,14 @@ enum SelfTest {
             log.append((condition ? "ok   " : "FAIL ") + what)
             if !condition { failures.append(what) }
         }
+        /// Some behaviour only happens when the app has keyboard focus (SwiftUI key handlers, for one).
+        /// A run in the background never takes focus, so such checks are skipped and listed, never
+        /// passed silently. Wrap them as `if needsFocus("what is checked") { ... }`.
+        func needsFocus(_ what: String) -> Bool {
+            if NSApp.isActive { return true }
+            log.append("skip \(what): needs keyboard focus; run FLOTION_FOREGROUND=1 Scripts/selftest.sh")
+            return false
+        }
         func pause(_ ms: Int = 120) async { try? await Task.sleep(for: .milliseconds(ms)) }
         /// Waits for a condition instead of guessing a delay, so the test is not timing-sensitive.
         func waitFor(_ seconds: Double = 5, _ condition: () -> Bool) async {
@@ -262,7 +270,12 @@ enum SelfTest {
             snapshot("04-welcome")
         }
 
-        log.append(failures.isEmpty ? "RESULT pass" : "RESULT fail (\(failures.count))")
+        if TestHost.focusTakenCount > 0 {
+            log.append("note macOS made the background app active \(TestHost.focusTakenCount) time(s); it gave focus straight back")
+        }
+        let skips = log.filter { $0.hasPrefix("skip ") }.count
+        let skipped = skips == 0 ? "" : ", \(skips) skipped"
+        log.append(failures.isEmpty ? "RESULT pass\(skipped)" : "RESULT fail (\(failures.count)\(skipped))")
         try? log.joined(separator: "\n").write(to: output.appendingPathComponent("result.txt"), atomically: true, encoding: .utf8)
         model.flushNow()
         exit(failures.isEmpty ? 0 : 1)

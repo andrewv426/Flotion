@@ -1,6 +1,8 @@
 #!/bin/bash
 # Measures the in-app budgets (launch, page open, typing, scrolling, memory) in a release build.
 # Usage: Scripts/perftest.sh [output-dir]
+# Runs in the background like selftest.sh (FLOTION_FOREGROUND=1 to watch). Timings still feel
+# whatever else the machine is doing, so treat a small miss on a busy machine as a rerun.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 OUT=${1:-.build/perftest}
