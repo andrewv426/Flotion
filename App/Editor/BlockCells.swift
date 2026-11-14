@@ -39,9 +39,34 @@ final class BlockTextView: NSTextView {
         return ok
     }
 
+    /// Whether the last draw pass painted the placeholder. The self-test reads it.
+    private(set) var drewPlaceholder = false
+
+    private var wantsPlaceholder: Bool {
+        string.isEmpty && !placeholder.isEmpty && (isTitle || window?.firstResponder === self)
+    }
+
+    /// With TextKit 2 the text is drawn in its own layout-fragment layers, so typing only
+    /// invalidates those and never this view's own layer, where `draw(_:)` paints the
+    /// placeholder. Without this the hint stays visible under the first characters typed.
+    private func refreshPlaceholder() {
+        if wantsPlaceholder != drewPlaceholder { needsDisplay = true }
+    }
+
+    override func didChangeText() {
+        super.didChangeText()
+        refreshPlaceholder()
+    }
+
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+        refreshPlaceholder()
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        guard string.isEmpty, !placeholder.isEmpty, isTitle || window?.firstResponder === self else { return }
+        drewPlaceholder = wantsPlaceholder
+        guard drewPlaceholder else { return }
         var attrs = RichText.attributes(style: blockStyle)
         attrs[.foregroundColor] = Theme.placeholder
         NSAttributedString(string: placeholder, attributes: attrs).draw(at: .zero)
