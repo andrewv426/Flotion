@@ -51,10 +51,10 @@ if [[ $APP -eq 1 ]]; then
 fi
 
 if [[ $UI -eq 1 ]]; then
-  step "In-app UI smoke test (opens the app window for a few seconds)"
+  step "In-app UI smoke test (runs in the background; FLOTION_FOREGROUND=1 to watch)"
   Scripts/selftest.sh .build/selftest
 
-  step "In-app performance budgets (release build; opens the app window)"
+  step "In-app performance budgets (release build, in the background)"
   Scripts/perftest.sh .build/perftest
 fi
 

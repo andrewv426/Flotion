@@ -103,7 +103,7 @@ final class AppModel {
             _ = try? await Task.detached { try Self.createWelcome(in: workspace) }.value
             await reloadPages()
         }
-        let last = UserDefaults.standard.string(forKey: "lastPageID")
+        let last = AppDefaults.store.string(forKey: "lastPageID")
         let target = pages.first { $0.id == last } ?? pages.first { $0.parentID == nil }
         if let target { await open(target.id) }
         signposter.endInterval("launch", state)
@@ -145,7 +145,7 @@ final class AppModel {
         selectedPageID = pageID
         title = pages.first { $0.id == pageID }?.title ?? ""
         editorGeneration += 1
-        UserDefaults.standard.set(pageID, forKey: "lastPageID")
+        AppDefaults.store.set(pageID, forKey: "lastPageID")
         if editor.hasPendingChanges { scheduleSave() }
         signposter.endInterval("openPage", state)
     }

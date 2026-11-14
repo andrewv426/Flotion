@@ -20,16 +20,16 @@ final class AIController {
 
     var status: AIProviderStatus?
     private(set) var chat: ChatSession
-    var isPanelOpen: Bool = UserDefaults.standard.bool(forKey: "aiPanelOpen") {
+    var isPanelOpen: Bool = AppDefaults.store.bool(forKey: "aiPanelOpen") {
         didSet {
-            UserDefaults.standard.set(isPanelOpen, forKey: "aiPanelOpen")
+            AppDefaults.store.set(isPanelOpen, forKey: "aiPanelOpen")
             if isPanelOpen, case .ready = status { chat.prewarm() }
         }
     }
     /// A Claude Code model alias, or empty for the account's default.
-    var modelChoice: String = UserDefaults.standard.string(forKey: "aiModel") ?? "" {
+    var modelChoice: String = AppDefaults.store.string(forKey: "aiModel") ?? "" {
         didSet {
-            UserDefaults.standard.set(modelChoice, forKey: "aiModel")
+            AppDefaults.store.set(modelChoice, forKey: "aiModel")
             chat.model = modelChoice.isEmpty ? nil : modelChoice
         }
     }
