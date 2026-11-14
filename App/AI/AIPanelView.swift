@@ -1,3 +1,4 @@
+import AppKit
 import FlotionAI
 import SwiftUI
 
@@ -78,6 +79,14 @@ struct AIPanelView: View {
                     .font(.system(size: 14))
                     .lineLimit(1...6)
                     .focused($composerFocused)
+                    .onKeyPress(.return, phases: .down) { press in
+                        // Return sends (through onSubmit). Shift-Return breaks the line, the same as
+                        // Option-Return: the field editor inserts it at the caret, so undo still works.
+                        guard press.modifiers.contains(.shift),
+                              let editor = NSApp.keyWindow?.firstResponder as? NSTextView else { return .ignored }
+                        editor.insertNewlineIgnoringFieldEditor(nil)
+                        return .handled
+                    }
                     .onSubmit { send(draft) }
                     .accessibilityIdentifier("ai-composer")
                 if ai.chat.isRunning {
