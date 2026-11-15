@@ -36,6 +36,7 @@ final class BlockTextView: NSTextView {
     override func resignFirstResponder() -> Bool {
         let ok = super.resignFirstResponder()
         needsDisplay = true
+        if ok { controller?.closeSlashMenu() }
         return ok
     }
 

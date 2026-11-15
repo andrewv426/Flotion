@@ -77,6 +77,11 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
     var inlinePopover: NSPopover?
     var inlineModel: InlineEditModel?
 
+    /// The open "/" menu, if any (see SlashMenu.swift).
+    private(set) var slashMenu: SlashMenuPresenter?
+    /// Where a "/" is about to be typed, recorded before the edit so the menu opens only for a typed slash.
+    private var typedSlashAt: Int?
+
     /// Exact heights of rows that have been laid out; other rows use an estimate
     /// so a long page paints without measuring every block first.
     private var heights: [String: CGFloat] = [:]
@@ -106,12 +111,18 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
         scrollView.drawsBackground = true
         scrollView.backgroundColor = Theme.page
         scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 160, right: 0)
+        // The slash menu is its own window, so it follows the "/" when the page scrolls.
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.slashMenu?.reposition() }
+        }
     }
 
     // MARK: Binding
 
     func show(_ state: EditorState, title: String) {
         let interval = signposter.beginInterval("showPage")
+        closeSlashMenu()
         self.state?.onChange = nil
         self.state = state
         self.title = title
@@ -138,6 +149,7 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
         switch change {
         case .structure:
             clearSelection()
+            closeSlashMenu()
             table.reloadData()
         case .rows(let indexes):
             for i in indexes where state.blocks.indices.contains(i) {
@@ -259,6 +271,7 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             widthChangeScheduled = false
+            slashMenu?.reposition()
             guard state != nil, table.numberOfRows > 0 else { return }
             heights.removeAll(keepingCapacity: true)
             NSAnimationContext.beginGrouping()
@@ -334,8 +347,15 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
 
     // MARK: Text view delegate
 
+    func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?) -> Bool {
+        typedSlashAt = replacementString == "/" ? range.location : nil
+        return true
+    }
+
     func textDidChange(_ notification: Notification) {
         guard let tv = notification.object as? BlockTextView, !tv.hasMarkedText() else { return }
+        let typedSlash = typedSlashAt
+        typedSlashAt = nil
         if tv.isTitle {
             title = tv.string
             onTitleChange?(tv.string)
@@ -343,10 +363,7 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
             flushHeights()
             return
         }
-        guard let state, let i = state.index(of: tv.blockID) else { return }
-        if tv.string == "/", state.blocks[i].type == .paragraph {
-            showBlockMenu(for: tv)
-        }
+        guard let state, state.index(of: tv.blockID) != nil else { return }
         let caret = tv.selectedRange().location
         // A Markdown shortcut may restyle the row; `apply(.rows)` has then already refreshed it.
         let converted = state.setRuns(RichText.runs(from: tv.attributedString()), for: tv.blockID, caret: caret)
@@ -358,10 +375,18 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
                 flushHeights()
             }
         }
+        if slashMenu != nil {
+            refreshSlashMenu(in: tv)
+        } else if let at = typedSlash, caret == at + 1, let j = state.index(of: tv.blockID),
+                  state.blocks[j].type.hasText, state.blocks[j].type != .code, SlashMenu.opens(in: tv.string, slashAt: at) {
+            openSlashMenu(in: tv, anchor: at)
+        }
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
-        if let tv = notification.object as? BlockTextView { selectionChanged(in: tv) }
+        guard let tv = notification.object as? BlockTextView else { return }
+        selectionChanged(in: tv)
+        if slashMenu != nil { refreshSlashMenu(in: tv) }
     }
 
     func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
@@ -380,6 +405,8 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
             }
             return false
         }
+
+        if slashMenu?.session.blockID == tv.blockID, let handled = slashMenuKey(selector) { return handled }
 
         let id = tv.blockID
         let isCode = state.index(of: id).map { state.blocks[$0].type == .code } ?? false
@@ -421,50 +448,84 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
 
     // MARK: Slash menu
 
-    private static let menuItems: [(String, BlockType)] = [
-        ("Text", .paragraph), ("Heading 1", .heading1), ("Heading 2", .heading2), ("Heading 3", .heading3),
-        ("Bulleted list", .bullet), ("Numbered list", .numbered), ("To-do list", .todo),
-        ("Quote", .quote), ("Code", .code), ("Divider", .divider),
-    ]
+    private func openSlashMenu(in tv: BlockTextView, anchor: Int) {
+        var session = SlashMenuSession(blockID: tv.blockID, anchor: anchor, commands: SlashMenu.commands(includingAI: ai != nil))
+        guard session.update(text: tv.string, caret: tv.selectedRange().location) else { return }
+        let menu = SlashMenuPresenter(session: session, textView: tv) { [weak self, weak tv] command in
+            guard let self, let tv else { return }
+            chooseSlashCommand(command, in: tv)
+        }
+        menu.model.onDismiss = { [weak self] in self?.closeSlashMenu() }
+        slashMenu = menu
+        menu.show()
+    }
 
-    private func showBlockMenu(for tv: BlockTextView) {
-        let menu = NSMenu()
-        if ai != nil {
-            let ask = NSMenuItem(title: "✦ Ask AI to write…", action: #selector(chooseBlockType(_:)), keyEquivalent: "")
-            ask.target = self
-            ask.tag = -1
-            ask.representedObject = tv.blockID
-            menu.addItem(ask)
-            menu.addItem(.separator())
+    /// Follows an edit or caret move in the menu's block; closes the menu when the "/" query ends.
+    private func refreshSlashMenu(in tv: BlockTextView) {
+        guard let menu = slashMenu, menu.session.blockID == tv.blockID else { return }
+        var session = menu.session
+        let selection = tv.selectedRange()
+        guard selection.length == 0, session.update(text: tv.string, caret: selection.location) else {
+            closeSlashMenu()
+            return
         }
-        for (index, item) in Self.menuItems.enumerated() {
-            let menuItem = NSMenuItem(title: item.0, action: #selector(chooseBlockType(_:)), keyEquivalent: "")
-            menuItem.target = self
-            menuItem.tag = index
-            menuItem.representedObject = tv.blockID
-            menu.addItem(menuItem)
-        }
-        // Shown after this edit finishes, so the "/" is in the model before it is cleared.
-        DispatchQueue.main.async {
-            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: tv.bounds.height + 4), in: tv)
+        if session != menu.session { menu.update(session) }
+    }
+
+    func closeSlashMenu() {
+        slashMenu?.close()
+        slashMenu = nil
+    }
+
+    /// Keys the menu takes while it is open; nil lets the editor handle the key as usual.
+    private func slashMenuKey(_ selector: Selector) -> Bool? {
+        guard let menu = slashMenu else { return nil }
+        switch selector {
+        case #selector(NSResponder.moveUp(_:)), #selector(NSResponder.moveDown(_:)):
+            var session = menu.session
+            session.move(selector == #selector(NSResponder.moveUp(_:)) ? -1 : 1)
+            menu.update(session)
+            return true
+        case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertTab(_:)):
+            // With nothing matching, Return closes the menu and does what it normally does.
+            guard let command = menu.session.selectedCommand else {
+                closeSlashMenu()
+                return nil
+            }
+            menu.model.onChoose?(command)
+            return true
+        case #selector(NSResponder.cancelOperation(_:)), #selector(NSTextView.complete(_:)):
+            closeSlashMenu()
+            return true
+        default:
+            return nil
         }
     }
 
-    @objc private func chooseBlockType(_ sender: NSMenuItem) {
-        guard let state, let id = sender.representedObject as? String, let i = state.index(of: id) else { return }
-        if state.blocks[i].plainText == "/" {
-            state.setRuns([], for: id, caret: 0)
-        }
-        if sender.tag == -1 {
-            apply(.rows([i]))
-            beginInlineEdit(blockID: id, range: NSRange(location: 0, length: 0), text: "")
-            return
-        }
-        let type = Self.menuItems[sender.tag].1
-        if type == state.blocks[i].type {
-            apply(.rows([i]))
-        } else {
-            state.setType(type, for: id)
+    /// Removes the typed "/query", then turns the block into the chosen type or opens the AI prompt.
+    func chooseSlashCommand(_ command: SlashCommand, in tv: BlockTextView) {
+        guard let menu = slashMenu, let state else { return }
+        let typed = menu.session.typedRange
+        closeSlashMenu()
+        let id = tv.blockID
+        let length = (tv.string as NSString).length
+        guard typed.lowerBound < length else { return }
+        tv.insertText("", replacementRange: NSRange(location: typed.lowerBound, length: min(typed.count, length - typed.lowerBound)))
+        guard let i = state.index(of: id) else { return }
+        switch command.action {
+        case .askAI:
+            beginInlineEdit(blockID: id, range: NSRange(location: typed.lowerBound, length: 0), text: "")
+        case .turnInto(let type):
+            if type == .divider, !state.blocks[i].runs.isEmpty {
+                // A line with text keeps it; the divider goes below.
+                state.insertBlock(Block(type: .divider), after: id)
+                state.focus = Focus(blockID: id, offset: typed.lowerBound)
+                applyFocus()
+            } else if type == state.blocks[i].type {
+                apply(.rows([i]))
+            } else {
+                state.setType(type, for: id)
+            }
         }
     }
 }
