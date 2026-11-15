@@ -133,36 +133,26 @@ enum SelfTest {
 
         // A diagram created the way the MCP tool creates one renders in the sandboxed web view.
         if let workspace = model.workspace, let pageID = model.selectedPageID {
-            func frame(_ client: String, _ server: String, _ arrow: String) -> String {
+            let source = """
+                flow right
+                client: Client
+                server: Server
+                client -> server
+                step "SYN": The client asks to open a connection.
+                  send client -> server: SYN
+                  tag client: SYN sent
+                  tag server: listening
+                step "SYN-ACK": The server acknowledges and asks back.
+                  send server -> client: SYN-ACK
+                  tag server: SYN received
+                step "ACK": The client confirms. The connection is open.
+                  send client -> server: ACK
+                  tag client, server: established
+                  mark client, server: good
                 """
-                <svg viewBox="0 0 600 220" xmlns="http://www.w3.org/2000/svg" font-family="var(--fl-font)">
-                  <rect x="40" y="60" width="150" height="100" rx="10" fill="none" stroke="var(--fl-border)" stroke-width="2"/>
-                  <rect x="410" y="60" width="150" height="100" rx="10" fill="none" stroke="var(--fl-border)" stroke-width="2"/>
-                  <text x="115" y="105" text-anchor="middle" fill="var(--fl-text)" font-size="17" font-weight="600">Client</text>
-                  <text x="485" y="105" text-anchor="middle" fill="var(--fl-text)" font-size="17" font-weight="600">Server</text>
-                  <text x="115" y="130" text-anchor="middle" fill="var(--fl-muted)" font-size="13">\(client)</text>
-                  <text x="485" y="130" text-anchor="middle" fill="var(--fl-muted)" font-size="13">\(server)</text>
-                  \(arrow)
-                </svg>
-                """
-            }
-            func arrow(_ label: String, leftToRight: Bool) -> String {
-                let (x1, x2) = leftToRight ? (200, 400) : (400, 200)
-                return """
-                <line x1="\(x1)" y1="110" x2="\(x2)" y2="110" stroke="var(--fl-accent)" stroke-width="3" stroke-linecap="round"/>
-                <circle cx="\(x2)" cy="110" r="7" fill="var(--fl-accent)"/>
-                <text x="300" y="96" text-anchor="middle" fill="var(--fl-accent)" font-size="15" font-weight="600">\(label)</text>
-                """
-            }
-            let steps = [
-                DiagramStep(title: "1. SYN", caption: "The client asks to open a connection.", svg: frame("SYN sent", "listening", arrow("SYN", leftToRight: true))),
-                DiagramStep(title: "2. SYN-ACK", caption: "The server acknowledges and asks back.", svg: frame("SYN sent", "SYN received", arrow("SYN-ACK", leftToRight: false))),
-                DiagramStep(title: "3. ACK", caption: "The client confirms. The connection is open.", svg: frame("established", "established", arrow("ACK", leftToRight: true))),
-            ]
-            let source = String(decoding: (try? JSONEncoder().encode(steps)) ?? Data(), as: UTF8.self)
-            let created = try? workspace.createDiagram(pageID: pageID, title: "TCP three-way handshake", format: .steps, source: source,
-                                                       height: 300, context: ChangeContext(actor: "selftest"))
-            check(created != nil, "a steps diagram passes validation and is stored")
+            let created = try? workspace.createDiagram(pageID: pageID, title: "TCP three-way handshake", format: .flow, source: source,
+                                                       context: ChangeContext(actor: "selftest"))
+            check(created != nil, "a Flow diagram passes validation and is stored")
             await waitFor { model.editor?.blocks.last?.type == .diagram }
             await pause(1200) // the web view loads asynchronously
             check(model.editor?.blocks.last?.type == .diagram, "the diagram block appears in the open page")
@@ -174,8 +164,17 @@ enum SelfTest {
                 return nil
             }
             if let web = findWebView(window()?.contentView) {
+                // The document loads in its own process: wait for the player instead of guessing how long that takes.
+                for _ in 0..<100 {
+                    if (try? await web.evaluateJavaScript("!!window.flotion") as? Bool) == true { break }
+                    await pause(50)
+                }
                 let count = try? await web.evaluateJavaScript("window.flotion ? window.flotion.count : -1") as? Int
-                check(count == 3, "the slideshow frame loaded with 3 steps, got \(String(describing: count))")
+                check(count == 3, "the player loaded with 3 steps, got \(String(describing: count))")
+                let drawn = try? await web.evaluateJavaScript("document.querySelectorAll('.node').length * 10 + document.querySelectorAll('.edge').length") as? Int
+                check(drawn == 21, "the player drew 2 nodes and 1 edge, got \(String(describing: drawn))")
+                let fits = try? await web.evaluateJavaScript("document.documentElement.scrollHeight <= window.innerHeight + 1") as? Bool
+                check(fits == true, "the diagram block is exactly as tall as its drawing, caption and controls")
                 let fetchResult = try? await web.callAsyncJavaScript(
                     "try { await fetch('https://example.com/'); return 'loaded' } catch (e) { return 'blocked' }",
                     arguments: [:], in: nil, contentWorld: .page) as? String
@@ -191,7 +190,11 @@ enum SelfTest {
                 }
                 await webSnapshot("05-diagram-step1")
                 _ = try? await web.evaluateJavaScript("window.flotion.go(2)")
-                await pause(500)
+                await pause(900)
+                let last = try? await web.evaluateJavaScript("[...document.querySelectorAll('.node')].map(n => n.dataset.tone + ':' + n.querySelector('.tag').textContent).join(' ')") as? String
+                check(last == "good:established good:established", "step 3 shows both ends established, got \(String(describing: last))")
+                let head = try? await web.evaluateJavaScript("document.querySelector('.edge').classList.contains('at-hi')") as? Bool
+                check(head == true, "the arrowhead is at the server end on the final ACK")
                 await webSnapshot("06-diagram-step3")
             } else {
                 check(false, "a web view exists for the visible diagram block")

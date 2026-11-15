@@ -108,29 +108,60 @@ private func object(_ json: String) throws -> [String: Any] {
 
     @Test func diagramsCanBeCreatedReadAndRevised() throws {
         let page = try ws.createPage(title: "P")
-        let steps: Value = [
-            ["title": "SYN", "svg": "<svg viewBox='0 0 100 40'><circle cx='10' cy='20' r='4'/></svg>"],
-            ["title": "ACK", "caption": "Connection open", "svg": "<svg viewBox='0 0 100 40'><circle cx='90' cy='20' r='4'/></svg>"],
-        ]
-        let created = tools.call("create_diagram", ["page_id": .string(page.id), "title": "Handshake", "format": "steps", "steps": steps])
+        let source = """
+            flow right
+            client: Client
+            server: Server
+            client -> server
+            step "SYN": The client asks to open a connection.
+              send client -> server: SYN
+            step "ACK": Connection open
+              send server -> client: ACK
+            """
+        let created = tools.call("create_diagram", ["page_id": .string(page.id), "title": "Handshake", "source": .string(source)])
         #expect(created.isError == false, "\(text(created))")
-        let blockID = try #require(try object(text(created))["block_id"] as? String)
+        let result = try object(text(created))
+        let blockID = try #require(result["block_id"] as? String)
+        #expect(result["format"] as? String == "flow")
+        #expect(result["nodes"] as? Int == 2 && result["edges"] as? Int == 1 && result["steps"] as? Int == 2)
         #expect(try ws.blocks(pageID: page.id).map(\.type) == [.diagram])
 
         let read = text(tools.call("get_diagram", ["block_id": .string(blockID)]))
-        #expect(read.contains("format: steps"))
-        #expect(read.contains("Connection open"))
+        #expect(read.contains("format: flow"))
+        #expect(read.contains("step \"ACK\": Connection open"), "the source comes back as written, ready to edit")
 
-        let external = tools.call("update_diagram", ["block_id": .string(blockID), "format": "html", "html": "<img src=\"https://example.com/x.png\">"])
-        #expect(external.isError == true)
-        #expect(text(external).contains("self-contained"))
-        #expect(try ws.diagram(forBlock: blockID)?.format == .steps, "a rejected update leaves the diagram untouched")
+        // A small change is an edit against the current source.
+        let edited = tools.call("update_diagram", ["block_id": .string(blockID), "edits": [["old": "server: Server", "new": "server: Server {shape: database}"]]])
+        #expect(edited.isError == false, "\(text(edited))")
+        #expect(try ws.diagram(forBlock: blockID)?.source.contains("{shape: database}") == true)
 
-        let revised = tools.call("update_diagram", ["block_id": .string(blockID), "format": "html", "html": "<div style='color:var(--fl-text)'>hi</div>", "height": 200])
-        #expect(revised.isError == false)
+        let missing = tools.call("update_diagram", ["block_id": .string(blockID), "edits": [["old": "sever: Server", "new": "x"]]])
+        #expect(missing.isError == true && text(missing).contains("was not found"))
+        let ambiguous = tools.call("update_diagram", ["block_id": .string(blockID), "edits": [["old": "client", "new": "c"]]])
+        #expect(ambiguous.isError == true && text(ambiguous).contains("times"))
+
+        // Mistakes come back by line, and nothing is saved.
+        let broken = tools.call("update_diagram", ["block_id": .string(blockID), "source": "a: A\na --> b\nstep \"x\"\n  send a -> c"])
+        #expect(broken.isError == true)
+        #expect(text(broken).contains("line 2: cannot read this line. Edges are written `a -> b: label`."))
+        #expect(text(broken).contains("line 4: unknown node `c`"))
+        #expect(try ws.diagram(forBlock: blockID)?.source.contains("{shape: database}") == true, "a rejected update leaves the diagram untouched")
+
+        // The html escape hatch still works, and is still checked.
+        let external = tools.call("update_diagram", ["block_id": .string(blockID), "html": "<img src=\"https://example.com/x.png\">"])
+        #expect(external.isError == true && text(external).contains("self-contained"))
+        #expect(try ws.diagram(forBlock: blockID)?.format == .flow)
+        let revised = tools.call("update_diagram", ["block_id": .string(blockID), "html": "<div style='color:var(--fl-text)'>hi</div>", "height": 200])
+        #expect(revised.isError == false, "\(text(revised))")
+        #expect(try ws.diagram(forBlock: blockID)?.format == .html)
         #expect(try ws.diagram(forBlock: blockID)?.height == 200)
+        let noEdits = tools.call("update_diagram", ["block_id": .string(blockID), "edits": [["old": "hi", "new": "yo"]]])
+        #expect(noEdits.isError == true && text(noEdits).contains("only work on Flow diagrams"))
 
-        #expect(tools.call("create_diagram", ["page_id": .string(page.id), "title": "x", "format": "steps"]).isError == true)
+        #expect(tools.call("create_diagram", ["page_id": .string(page.id), "title": "x"]).isError == true)
+        #expect(tools.call("create_diagram", ["page_id": .string(page.id), "title": "x", "source": "a: A", "html": "<p>a</p>"]).isError == true)
+        let legacy = tools.call("create_diagram", ["page_id": .string(page.id), "title": "x", "format": "steps", "steps": [["svg": "<svg/>"]]])
+        #expect(legacy.isError == true && text(legacy).contains("no longer created"))
     }
 }
 

@@ -21,30 +21,66 @@ private let markdownNote = """
     """
 
 private let diagramGuide = """
-    Two formats:
-    • "steps" — a slideshow. Pass `steps`: an array of {title?, caption?, svg | html}. Flotion supplies the frame, \
-    the transition between steps, progress dots and previous / next / play controls. Give every step an SVG with the \
-    same viewBox and keep shared elements in the same place, so the viewer sees things appear, move or change from \
-    step to step. Best for processes, sequences, protocols and before/after comparisons.
-    • "html" — one self-contained HTML document (inline CSS, JS and SVG) for a bespoke animation. It runs in a \
-    sandbox with no network access.
-    Rules for both: everything must be inline — no external scripts, stylesheets, fonts or images. Use the theme \
-    variables so the diagram matches light and dark mode: --fl-bg, --fl-text, --fl-muted, --fl-accent, --fl-border, \
-    --fl-font. Leave the background transparent. Design for a width of about 700 points; `height` is in points \
-    (120–1200, default 360).
+    Diagrams are written in Flow, a small text language. You say what exists and what changes at each step; \
+    Flotion places everything, draws the arrows and animates between steps. There are no coordinates, colours or sizes.
+
+    flow right | down                          direction (default right)
+    id: Label {shape: box|pill|circle|diamond|database}
+    a -> b: label {style: dashed}              an arrow; label and style are optional
+    group id "Title" {                         a shaded region around the nodes declared inside it
+      ...nodes...
+    }
+    step "Title": caption                      every line after this belongs to the step
+      send a -> b: label                       a message travels between a and b, in that direction
+      focus a, b                               dim everything else
+      tag a, b: status                         a short status line inside the node
+      mark a: accent|good|warn|bad|muted|none  colour by meaning
+      set a: New label
+      hide a, b
+      show a, b
+      x: New node                              a node or edge declared in a step appears at that step
+
+    Rules: ids use letters, digits, _ and -. Declare a node before using it. `send` needs a declared edge between \
+    the two nodes (either direction) and may go against it, as a reply does. `send` and `focus` last for their step \
+    only; tag, mark, set, hide and show carry on until changed. `# ` starts a comment. A diagram without steps is a \
+    still picture. Keep labels to a few words and put the explanation in step captions; 3 to 8 nodes and 3 to 6 \
+    steps reads best.
+
+    Example:
+    flow right
+    client: Client
+    server: Server {shape: database}
+    client -> server
+    step "SYN": The client asks to open a connection.
+      send client -> server: SYN
+      tag client: SYN sent
+    step "SYN-ACK": The server acknowledges and asks back.
+      send server -> client: SYN-ACK
+      tag server: SYN received
+    step "ACK": The connection is open.
+      send client -> server: ACK
+      mark client, server: good
+
+    If the source has mistakes the call fails with `line N: problem` for each one and nothing is saved: fix those \
+    lines and call again.
     """
 
-private let stepsSchema: Value = [
+private let htmlNote = """
+    Only when Flow cannot express the visual: one self-contained HTML document (inline CSS, JS and SVG) that runs \
+    in a sandbox with no network. Use the theme variables --fl-bg, --fl-text, --fl-muted, --fl-accent, --fl-border, \
+    --fl-font, leave the background transparent and set `height`.
+    """
+
+private let editsSchema: Value = [
     "type": "array",
-    "description": "For format \"steps\": the slides, in order.",
+    "description": "Small changes to a Flow diagram, applied in order. Each `old` must match the current source exactly once.",
     "items": [
         "type": "object",
         "properties": [
-            "title": ["type": "string", "description": "Short heading shown above the step."],
-            "caption": ["type": "string", "description": "One or two sentences explaining the step."],
-            "svg": ["type": "string", "description": "A complete <svg> element for this step."],
-            "html": ["type": "string", "description": "An HTML fragment for this step (alternative to svg)."],
+            "old": ["type": "string", "description": "Exact text in the current source, such as one whole line."],
+            "new": ["type": "string", "description": "What replaces it; an empty string deletes it."],
         ],
+        "required": ["old", "new"],
     ],
 ]
 
@@ -89,21 +125,23 @@ public extension FlotionTools {
              inputSchema: object(["page_id": string("The page to move to the Trash.")], required: ["page_id"]),
              annotations: .init(destructiveHint: true)),
         Tool(name: "create_diagram",
-             description: "Create an animated or step-by-step diagram and insert it into a page as a block. " + diagramGuide,
+             description: "Create a diagram, optionally animated step by step, and insert it into a page as a block. " + diagramGuide,
              inputSchema: object(["page_id": string("The page to insert into."), "title": string("Diagram title."),
-                                  "format": ["type": "string", "enum": ["steps", "html"], "description": "Which format the content is in."],
-                                  "steps": stepsSchema, "html": string("For format \"html\": the full HTML document."),
+                                  "source": string("The diagram in Flow."),
+                                  "html": string(htmlNote),
                                   "after_block_id": string("Insert directly after this block; otherwise at the end."),
-                                  "height": number("Display height in points.")], required: ["page_id", "title", "format"])),
+                                  "height": number("For `html` only: display height in points (120–1200, default 360). Flow diagrams size themselves.")],
+                          required: ["page_id", "title"])),
         Tool(name: "get_diagram",
              description: "Read a diagram block's title, format and source so it can be revised.",
              inputSchema: object(["block_id": string("The diagram block (from get_page).")], required: ["block_id"]),
              annotations: .init(readOnlyHint: true)),
         Tool(name: "update_diagram",
-             description: "Change an existing diagram's title, content or height. " + diagramGuide,
+             description: "Change an existing diagram. For a small change to a Flow diagram pass `edits`; to rewrite it pass a whole new `source`. " + diagramGuide,
              inputSchema: object(["block_id": string("The diagram block to change."), "title": string("New title."),
-                                  "format": ["type": "string", "enum": ["steps", "html"], "description": "Only when switching format."],
-                                  "steps": stepsSchema, "html": string("Replacement HTML document."),
-                                  "height": number("Display height in points.")], required: ["block_id"])),
+                                  "source": string("The whole diagram in Flow, replacing the current one."),
+                                  "edits": editsSchema,
+                                  "html": string(htmlNote),
+                                  "height": number("For `html` only: display height in points.")], required: ["block_id"])),
     ]
 }

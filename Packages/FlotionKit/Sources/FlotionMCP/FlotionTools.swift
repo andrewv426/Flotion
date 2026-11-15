@@ -147,50 +147,83 @@ public struct FlotionTools: Sendable {
 
     // MARK: Diagrams
 
-    private func diagramSource(_ a: Args, format: DiagramFormat) throws -> String? {
-        switch format {
-        case .html: return a.optString("html")
-        case .steps:
-            guard let steps = a.raw["steps"] else { return nil }
-            if let string = steps.stringValue { return string }
-            return String(decoding: try JSONEncoder().encode(steps), as: UTF8.self)
+    /// The new content a call carries, if any: Flow `source`, or an `html` document.
+    private func diagramContent(_ a: Args) throws -> (format: DiagramFormat, source: String)? {
+        if a.has("steps") || a.optString("format") == "steps" {
+            throw FlotionError.invalid("The steps format is no longer created. Write the diagram as Flow in `source`.")
+        }
+        switch (a.optString("source"), a.optString("html")) {
+        case (.some, .some): throw FlotionError.invalid("Provide either `source` or `html`, not both.")
+        case (let source?, nil): return (.flow, source)
+        case (nil, let html?): return (.html, html)
+        case (nil, nil): return nil
         }
     }
 
-    private func createDiagram(_ a: Args) throws -> String {
-        guard let format = DiagramFormat(rawValue: try a.string("format")) else {
-            throw FlotionError.invalid("format must be \"steps\" or \"html\".")
+    /// What the caller gets back: enough to see the diagram came out the size and shape it meant.
+    private func diagramResult(blockID: String, _ diagram: Diagram) -> String {
+        var out: [String: Value] = ["block_id": .string(blockID), "diagram_id": .string(diagram.id), "format": .string(diagram.format.rawValue)]
+        if diagram.format == .flow, let scene = try? FlowScene(source: diagram.source) {
+            out["nodes"] = .int(scene.nodes.count)
+            out["edges"] = .int(scene.edges.count)
+            out["steps"] = .int(scene.stepped ? scene.steps.count : 0)
+            out["size"] = .string("\(Int(scene.w))x\(Int(scene.h))")
+        } else {
+            out["height"] = .double(diagram.height)
         }
-        guard let source = try diagramSource(a, format: format) else {
-            throw FlotionError.invalid(format == .steps ? "Provide `steps` for a steps diagram." : "Provide `html` for an html diagram.")
+        return json(.object(out))
+    }
+
+    private func createDiagram(_ a: Args) throws -> String {
+        guard let content = try diagramContent(a) else {
+            throw FlotionError.invalid("Provide the diagram as Flow in `source`.")
         }
         let position: InsertPosition = a.optString("after_block_id").map { .after($0) } ?? .end
         let (diagram, block) = try workspace.createDiagram(
-            pageID: try a.string("page_id"), title: try a.string("title"), format: format, source: source,
+            pageID: try a.string("page_id"), title: try a.string("title"), format: content.format, source: content.source,
             height: a.double("height"), at: position, context: context)
-        return json(["block_id": .string(block.id), "diagram_id": .string(diagram.id), "height": .double(diagram.height)])
+        return diagramResult(blockID: block.id, diagram)
     }
 
     private func getDiagram(_ a: Args) throws -> String {
         let blockID = try a.string("block_id")
         guard let d = try workspace.diagram(forBlock: blockID) else { throw FlotionError.notFound("diagram for block \(blockID)") }
-        return "title: \(d.title)\nformat: \(d.format.rawValue)\nheight: \(Int(d.height))\n\n\(d.source)"
+        let height = d.format == .flow ? "" : "\nheight: \(Int(d.height))"
+        return "title: \(d.title)\nformat: \(d.format.rawValue)\(height)\n\n\(d.source)"
     }
 
     private func updateDiagram(_ a: Args) throws -> String {
         let blockID = try a.string("block_id")
         guard let existing = try workspace.diagram(forBlock: blockID) else { throw FlotionError.notFound("diagram for block \(blockID)") }
-        let format = try a.optString("format").map { raw -> DiagramFormat in
-            guard let f = DiagramFormat(rawValue: raw) else { throw FlotionError.invalid("format must be \"steps\" or \"html\".") }
-            return f
+        var content = try diagramContent(a)
+        if let edits = a.raw["edits"]?.arrayValue {
+            guard content == nil else { throw FlotionError.invalid("Provide `edits` or a whole new `source`, not both.") }
+            guard existing.format == .flow else {
+                throw FlotionError.invalid("`edits` only work on Flow diagrams; this one is \(existing.format.rawValue). Send a whole new `source` instead.")
+            }
+            content = (.flow, try Self.apply(edits, to: existing.source))
         }
-        let source = try diagramSource(a, format: format ?? existing.format)
-        if format != nil, format != existing.format, source == nil {
-            throw FlotionError.invalid("Changing the format needs new content in the same call.")
-        }
-        let d = try workspace.updateDiagram(id: existing.id, title: a.optString("title"), format: format, source: source,
+        let d = try workspace.updateDiagram(id: existing.id, title: a.optString("title"), format: content?.format, source: content?.source,
                                             height: a.double("height"), notify: true)
-        return json(["block_id": .string(blockID), "diagram_id": .string(d.id), "height": .double(d.height)])
+        return diagramResult(blockID: blockID, d)
+    }
+
+    /// Replaces each `old` with its `new`, in order. An `old` must match exactly once, so an edit can never land somewhere unintended.
+    private static func apply(_ edits: [Value], to source: String) throws -> String {
+        var text = source
+        for (i, edit) in edits.enumerated() {
+            guard let old = edit.objectValue?["old"]?.stringValue, !old.isEmpty, let new = edit.objectValue?["new"]?.stringValue else {
+                throw FlotionError.invalid("Edit \(i + 1) needs `old` (the exact text to find) and `new` (its replacement).")
+            }
+            let matches = text.components(separatedBy: old).count - 1
+            guard matches == 1 else {
+                throw FlotionError.invalid(matches == 0
+                    ? "Edit \(i + 1): `old` was not found. Read the source with get_diagram and copy the text exactly."
+                    : "Edit \(i + 1): `old` appears \(matches) times. Include more of the line so it matches once.")
+            }
+            text = text.replacingOccurrences(of: old, with: new)
+        }
+        return text
     }
 
     private func json(_ value: Value) -> String {

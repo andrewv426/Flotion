@@ -67,7 +67,7 @@ The app and `flotion-mcp` share one SQLite file in WAL mode. After a write, `flo
 |---|---|
 | `pages` | Tree of pages; `archived_at` is the Trash |
 | `blocks` | Flat ordered list per page with a `depth` column. Plain text lives in `plain`; `text` holds JSON runs only when a block has formatting |
-| `diagrams` | Diagram source, as a full HTML document or a JSON array of steps |
+| `diagrams` | Diagram source: Flow text, or for the older formats a full HTML document or a JSON array of steps |
 | `change_log` | Every write made by an AI or MCP client, with before and after, grouped into turns so a turn can be undone |
 | `blocks_fts`, `pages_fts` | FTS5 indexes kept in sync by triggers |
 
@@ -83,11 +83,33 @@ The app never signs in and never sees a credential. It runs the unmodified `clau
 
 `FlotionAITests` asserts each of these flags.
 
+## How a diagram is drawn
+
+A diagram is written in Flow, a line-per-statement language with no coordinates, colours or sizes: nodes, arrows, groups, and steps that say what changes. Everything between the source and the picture runs in `FlotionCore`, so the MCP server can reject a bad diagram at the tool call and the app knows a diagram's height before any web view exists.
+
+```mermaid
+flowchart LR
+    source["Flow source<br/>(stored in diagrams)"] --> parser["FlowParser<br/>model, or problems by line"]
+    parser --> states["states()<br/>the picture at each step"]
+    parser --> layout["FlowLayout<br/>positions, arrow routes"]
+    states --> scene["FlowScene<br/>resolved JSON"]
+    layout --> scene
+    scene --> player["Player in the web view<br/>switches between states"]
+```
+
+| Stage | What it decides |
+|---|---|
+| `FlowParser` | What the source means. Every problem is reported with its line and, where it can guess, the fix |
+| `FlowDiagram.states()` | What is visible, labelled, coloured and dimmed at each step. `tag`, `mark`, `set`, `hide` and `show` carry forward; `send` and `focus` last one step |
+| `FlowLayout` | Where things go, once, over everything the diagram ever shows, so nothing moves between steps. Layered: rank by longest path, order to avoid crossings, then align so chains are straight. Arrows run outline to outline |
+| `FlowScene` | The SVG paths and per-step states, as JSON |
+| The player (`DiagramTemplate`) | Nothing. It draws the scene and moves between states with CSS transitions |
+
 ## How diagrams are contained
 
-A diagram is LLM-authored HTML, so it is treated as untrusted:
+A Flow diagram is data, not code: its labels reach the page only as text, and the script that draws it is Flotion's own. The older `html` format (still available as an escape hatch) and `steps` format (still rendered, no longer created) carry LLM-authored markup, so every diagram document is treated as untrusted:
 
-1. `DiagramValidator` rejects external references before anything is stored, which also gives the model a useful error.
+1. `DiagramValidator` rejects Flow source with mistakes, and external references in HTML, before anything is stored, which also gives the model a useful error.
 2. `DiagramTemplate` adds a Content-Security-Policy of `default-src 'none'` to every document.
 3. The web view has a content rule that blocks every network request, a non-persistent data store, and refuses navigation.
 
