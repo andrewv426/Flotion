@@ -15,10 +15,16 @@ final class SlashMenuPresenter {
     private weak var textView: BlockTextView?
     private var observers: [NSObjectProtocol] = []
 
-    static let width: CGFloat = 320
-    static let rowHeight: CGFloat = 46
-    static let headerHeight: CGFloat = 28
-    static let maxHeight: CGFloat = 360
+    static let width: CGFloat = 300
+    static let rowHeight: CGFloat = 28
+    static let headerHeight: CGFloat = 26
+    static let footerHeight: CGFloat = 32
+    static let listPadding: CGFloat = 4
+    static let maxListHeight: CGFloat = 320
+    /// Room around the menu inside the panel for its soft shadow, which the panel draws itself.
+    static let shadowMargin: CGFloat = 40
+    /// Gap between the line with the "/" and the menu.
+    static let gap: CGFloat = 4
 
     init(session: SlashMenuSession, textView: BlockTextView, onChoose: @escaping (SlashCommand) -> Void) {
         model = SlashMenuModel(session: session)
@@ -27,10 +33,11 @@ final class SlashMenuPresenter {
                                styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        panel.hasShadow = false
         panel.hidesOnDeactivate = true
         panel.isReleasedWhenClosed = false
-        panel.animationBehavior = .utilityWindow
+        // Appears and goes at once, like the text it belongs to.
+        panel.animationBehavior = .none
         panel.contentView = FirstClickHostingView(rootView: SlashMenuView(model: model))
         panel.setAccessibilityIdentifier("slash-menu")
         model.onChoose = onChoose
@@ -57,27 +64,29 @@ final class SlashMenuPresenter {
         reposition()
     }
 
-    /// Sits under the "/" (or above it when there is no room below), sized to its rows.
+    /// Sits just under the line with the "/", its left edge at the text's (or above the line when
+    /// there is no room below), sized to its rows.
     func reposition() {
         guard let tv = textView, tv.window != nil else { return }
-        let caret = tv.firstRect(forCharacterRange: NSRange(location: session.anchor, length: 0), actualRange: nil)
-        guard caret.origin.x.isFinite, caret.origin.y.isFinite else { return }
-        let height = contentHeight
-        var origin = NSPoint(x: caret.minX - 8, y: caret.minY - 6 - height)
+        let line = tv.firstRect(forCharacterRange: NSRange(location: session.anchor, length: 0), actualRange: nil)
+        guard line.origin.x.isFinite, line.origin.y.isFinite else { return }
+        let menu = NSSize(width: Self.width, height: Self.menuHeight(for: session))
+        let m = Self.shadowMargin
+        var origin = NSPoint(x: line.minX - Self.listPadding - 8 - m, y: line.minY - Self.gap - menu.height - m)
         if let screen = tv.window?.screen?.visibleFrame {
-            if origin.y < screen.minY { origin.y = caret.maxY + 6 }
-            origin.x = min(max(origin.x, screen.minX + 4), screen.maxX - Self.width - 4)
+            if origin.y + m < screen.minY { origin.y = line.maxY + Self.gap - m }
+            origin.x = min(max(origin.x, screen.minX + 4 - m), screen.maxX - menu.width - 4 - m)
         }
-        panel.setFrame(NSRect(origin: origin, size: NSSize(width: Self.width, height: height)), display: true)
+        panel.setFrame(NSRect(x: origin.x, y: origin.y, width: menu.width + 2 * m, height: menu.height + 2 * m), display: true)
     }
 
-    private var contentHeight: CGFloat {
-        let s = session
-        if s.matches.isEmpty { return 44 }
-        let headers = SlashMenuView.sections(for: s).count
-        let rows = CGFloat(s.matches.count) * Self.rowHeight + CGFloat(headers) * Self.headerHeight + 12
-        return min(rows, Self.maxHeight)
+    static func listHeight(for s: SlashMenuSession) -> CGFloat {
+        if s.matches.isEmpty { return rowHeight + 2 * listPadding }
+        let headers = CGFloat(SlashMenuView.sections(for: s).count)
+        return min(CGFloat(s.matches.count) * rowHeight + headers * headerHeight + 2 * listPadding, maxListHeight)
     }
+
+    static func menuHeight(for s: SlashMenuSession) -> CGFloat { listHeight(for: s) + 1 + footerHeight }
 
     func close() {
         observers.forEach(NotificationCenter.default.removeObserver)
@@ -92,10 +101,18 @@ final class SlashMenuModel {
     var session: SlashMenuSession
     @ObservationIgnored var onChoose: ((SlashCommand) -> Void)?
     @ObservationIgnored var onDismiss: (() -> Void)?
+    @ObservationIgnored private var lastMouse: NSPoint?
 
     init(session: SlashMenuSession) { self.session = session }
 
-    func hover(_ index: Int) { session.select(index) }
+    /// Follows the pointer only when it actually moves, so rows scrolling under a resting pointer
+    /// do not steal the highlight from the keyboard.
+    func hover(_ index: Int) {
+        let mouse = NSEvent.mouseLocation
+        guard mouse != lastMouse else { return }
+        lastMouse = mouse
+        session.select(index)
+    }
 
     func choose(_ index: Int) {
         session.select(index)
@@ -127,46 +144,75 @@ struct SlashMenuView: View {
         return result
     }
 
+    private static let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+
     var body: some View {
+        VStack(spacing: 0) {
+            list.frame(height: SlashMenuPresenter.listHeight(for: model.session))
+            Rectangle().fill(Color(nsColor: Theme.divider)).frame(height: 1)
+            footer
+        }
+        .frame(width: SlashMenuPresenter.width)
+        .background(Self.shape.fill(Color(nsColor: Theme.menuBackground)))
+        .clipShape(Self.shape)
+        .overlay(Self.shape.strokeBorder(Color(nsColor: Theme.divider), lineWidth: 1))
+        // A close, crisp shadow and a wide, soft one, so the menu floats just off the page.
+        .shadow(color: Color(nsColor: Theme.menuShadow).opacity(0.5), radius: 2, y: 1)
+        .shadow(color: Color(nsColor: Theme.menuShadow), radius: 14, y: 6)
+        .padding(SlashMenuPresenter.shadowMargin)
+        .foregroundStyle(Color(nsColor: Theme.text))
+    }
+
+    private var list: some View {
         let session = model.session
         let sections = Self.sections(for: session)
-        ScrollViewReader { proxy in
+        return ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     if session.matches.isEmpty {
                         Text("No results")
-                            .font(.system(size: 13))
+                            .font(.system(size: 14))
                             .foregroundStyle(Color(nsColor: Theme.secondary))
-                            .padding(.horizontal, 10)
-                            .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+                            .padding(.horizontal, 12)
+                            .frame(maxWidth: .infinity, minHeight: SlashMenuPresenter.rowHeight, alignment: .leading)
                     }
                     ForEach(Array(session.matches.enumerated()), id: \.element.id) { index, command in
                         if let section = sections.first(where: { $0.start == index }) {
                             Text(section.title)
-                                .font(.system(size: 11, weight: .medium))
+                                .font(.system(size: 12, weight: .medium))
                                 .foregroundStyle(Color(nsColor: Theme.secondary))
-                                .padding(.horizontal, 10)
+                                .padding(.horizontal, 12)
+                                .padding(.bottom, 5)
                                 .frame(maxWidth: .infinity, minHeight: SlashMenuPresenter.headerHeight, alignment: .bottomLeading)
-                                .padding(.bottom, 2)
                         }
                         SlashMenuRow(command: command, isSelected: index == session.selected)
                             .id(command.id)
                             .contentShape(Rectangle())
-                            .onHover { if $0 { model.hover(index) } }
+                            .onContinuousHover { if case .active = $0 { model.hover(index) } }
                             .onTapGesture { model.choose(index) }
                     }
                 }
-                .padding(6)
+                .padding(.vertical, SlashMenuPresenter.listPadding)
             }
             .scrollIndicators(.never)
             .onChange(of: session.selected) {
                 if let command = model.session.selectedCommand { proxy.scrollTo(command.id) }
             }
         }
-        .foregroundStyle(Color(nsColor: Theme.text))
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: Theme.page)))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(nsColor: Theme.divider), lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var footer: some View {
+        HStack {
+            Text("Close menu")
+            Spacer()
+            Text("esc")
+        }
+        .font(.system(size: 12))
+        .foregroundStyle(Color(nsColor: Theme.secondary))
+        .padding(.horizontal, 12)
+        .frame(height: SlashMenuPresenter.footerHeight)
+        .contentShape(Rectangle())
+        .onTapGesture { model.onDismiss?() }
     }
 }
 
@@ -175,40 +221,41 @@ private struct SlashMenuRow: View {
     let isSelected: Bool
 
     var body: some View {
-        HStack(spacing: 10) {
-            icon
-                .frame(width: 34, height: 34)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: Theme.page)))
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: Theme.divider), lineWidth: 1))
-            VStack(alignment: .leading, spacing: 1) {
-                Text(command.title).font(.system(size: 14))
-                Text(command.detail).font(.system(size: 12)).foregroundStyle(Color(nsColor: Theme.secondary))
+        HStack(spacing: 8) {
+            icon.frame(width: 20, height: 20)
+            Text(command.title).font(.system(size: 14)).lineLimit(1)
+            Spacer(minLength: 8)
+            if let shortcut = command.shortcut {
+                Text(shortcut.trimmingCharacters(in: .whitespaces))
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color(nsColor: Theme.secondary))
             }
-            .lineLimit(1)
-            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 6)
+        .padding(.horizontal, 8)
         .frame(height: SlashMenuPresenter.rowHeight)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: isSelected ? Theme.hover : .clear)))
+        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color(nsColor: isSelected ? Theme.hover : .clear)))
+        .padding(.horizontal, SlashMenuPresenter.listPadding)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(command.title), \(command.detail)")
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 
     @ViewBuilder private var icon: some View {
         switch command.action {
         case .askAI:
-            Image(systemName: "sparkles").font(.system(size: 15)).foregroundStyle(Color(nsColor: Theme.accent))
+            Image(systemName: "sparkles").font(.system(size: 14)).foregroundStyle(Color(nsColor: Theme.accent))
         case .turnInto(let type):
             switch type {
             case .heading1: badge("H1")
             case .heading2: badge("H2")
             case .heading3: badge("H3")
-            case .paragraph: badge("Aa")
             default: Image(systemName: Self.symbol(for: type)).font(.system(size: 14))
             }
         }
     }
 
     private func badge(_ text: String) -> some View {
-        Text(text).font(.system(size: 13, weight: .semibold))
+        Text(text).font(.system(size: 12, weight: .semibold))
     }
 
     private static func symbol(for type: BlockType) -> String {

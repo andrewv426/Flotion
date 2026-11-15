@@ -22,6 +22,9 @@ enum Theme {
     static let placeholder = NSColor.dynamic(light: NSColor(hex: 0x37352F, alpha: 0.3), dark: NSColor(white: 1, alpha: 0.28))
     static let hover = NSColor.dynamic(light: NSColor(hex: 0x37352F, alpha: 0.08), dark: NSColor(white: 1, alpha: 0.055))
     static let divider = NSColor.dynamic(light: NSColor(hex: 0x37352F, alpha: 0.09), dark: NSColor(white: 1, alpha: 0.094))
+    /// Floating menus: a surface a step lighter than the page in dark mode, and the shadow under it.
+    static let menuBackground = NSColor.dynamic(light: .white, dark: NSColor(hex: 0x252525))
+    static let menuShadow = NSColor.dynamic(light: NSColor(white: 0, alpha: 0.14), dark: NSColor(white: 0, alpha: 0.5))
     static let accent = NSColor(hex: 0x2383E2)
     static let codeText = NSColor(hex: 0xEB5757)
     static let codeBackground = NSColor(hex: 0x878378, alpha: 0.15)

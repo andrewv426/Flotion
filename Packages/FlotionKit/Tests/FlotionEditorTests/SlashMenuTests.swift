@@ -66,6 +66,17 @@ import FlotionEditor
         #expect(stays, "spaces inside a matching query are fine")
     }
 
+    @MainActor @Test func everyShortcutHintReallyConvertsTheLine() {
+        for command in SlashMenu.blockCommands {
+            guard let shortcut = command.shortcut, case .turnInto(let type) = command.action else { continue }
+            let e = EditorState(pageID: "p", blocks: [Block(pageID: "p", type: .paragraph, position: 1024)])
+            _ = e.setRuns([TextRun(shortcut)], for: e.blocks[0].id, caret: shortcut.utf16.count)
+            #expect(e.blocks[0].type == type, "typing \(shortcut.debugDescription) should make a \(type.rawValue)")
+            #expect(e.blocks[0].plainText.isEmpty, "the shortcut itself is removed")
+        }
+        #expect(SlashMenu.blockCommands.filter { $0.shortcut != nil }.count == 9, "every block type except plain text has a hint")
+    }
+
     @Test func highlightWrapsAndResetsWhenTheQueryChanges() {
         var s = session("/head")
         s.move(1)

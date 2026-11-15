@@ -14,14 +14,18 @@ public struct SlashCommand: Equatable, Sendable, Identifiable {
     public let detail: String
     /// Extra words the filter matches, such as "h1" or "todo".
     public let keywords: [String]
+    /// What to type at the start of a line for the same result without the menu, if anything.
+    /// Shown faintly beside the entry; a test checks each one really converts the line.
+    public let shortcut: String?
     public let action: SlashAction
 
     public var id: String { title }
 
-    public init(title: String, detail: String, keywords: [String] = [], action: SlashAction) {
+    public init(title: String, detail: String, keywords: [String] = [], shortcut: String? = nil, action: SlashAction) {
         self.title = title
         self.detail = detail
         self.keywords = keywords
+        self.shortcut = shortcut
         self.action = action
     }
 }
@@ -32,15 +36,15 @@ public enum SlashMenu {
 
     public static let blockCommands: [SlashCommand] = [
         SlashCommand(title: "Text", detail: "Plain paragraph", keywords: ["paragraph", "plain"], action: .turnInto(.paragraph)),
-        SlashCommand(title: "Heading 1", detail: "Large section heading", keywords: ["h1", "title"], action: .turnInto(.heading1)),
-        SlashCommand(title: "Heading 2", detail: "Medium section heading", keywords: ["h2", "subtitle"], action: .turnInto(.heading2)),
-        SlashCommand(title: "Heading 3", detail: "Small section heading", keywords: ["h3"], action: .turnInto(.heading3)),
-        SlashCommand(title: "Bulleted list", detail: "List with bullet points", keywords: ["bullet", "ul", "unordered"], action: .turnInto(.bullet)),
-        SlashCommand(title: "Numbered list", detail: "List with numbers", keywords: ["ol", "ordered", "number"], action: .turnInto(.numbered)),
-        SlashCommand(title: "To-do list", detail: "Checklist of tasks", keywords: ["todo", "task", "checkbox", "check"], action: .turnInto(.todo)),
-        SlashCommand(title: "Quote", detail: "Quoted passage", keywords: ["blockquote", "citation"], action: .turnInto(.quote)),
-        SlashCommand(title: "Code", detail: "Monospaced code snippet", keywords: ["snippet", "pre"], action: .turnInto(.code)),
-        SlashCommand(title: "Divider", detail: "Line between blocks", keywords: ["hr", "rule", "separator", "line"], action: .turnInto(.divider)),
+        SlashCommand(title: "Heading 1", detail: "Large section heading", keywords: ["h1", "title"], shortcut: "# ", action: .turnInto(.heading1)),
+        SlashCommand(title: "Heading 2", detail: "Medium section heading", keywords: ["h2", "subtitle"], shortcut: "## ", action: .turnInto(.heading2)),
+        SlashCommand(title: "Heading 3", detail: "Small section heading", keywords: ["h3"], shortcut: "### ", action: .turnInto(.heading3)),
+        SlashCommand(title: "Bulleted list", detail: "List with bullet points", keywords: ["bullet", "ul", "unordered"], shortcut: "- ", action: .turnInto(.bullet)),
+        SlashCommand(title: "Numbered list", detail: "List with numbers", keywords: ["ol", "ordered", "number"], shortcut: "1. ", action: .turnInto(.numbered)),
+        SlashCommand(title: "To-do list", detail: "Checklist of tasks", keywords: ["todo", "task", "checkbox", "check"], shortcut: "[] ", action: .turnInto(.todo)),
+        SlashCommand(title: "Quote", detail: "Quoted passage", keywords: ["blockquote", "citation"], shortcut: "> ", action: .turnInto(.quote)),
+        SlashCommand(title: "Code", detail: "Monospaced code snippet", keywords: ["snippet", "pre"], shortcut: "```", action: .turnInto(.code)),
+        SlashCommand(title: "Divider", detail: "Line between blocks", keywords: ["hr", "rule", "separator", "line"], shortcut: "---", action: .turnInto(.divider)),
     ]
 
     /// The entries offered, with "Ask AI" first when an assistant is available.
