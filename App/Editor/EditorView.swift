@@ -217,7 +217,8 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
     private func staticHeight(_ block: Block) -> CGFloat {
         switch block.type {
         case .divider: 25
-        case .diagram: (block.props.diagramID.flatMap(diagram)?.height ?? 120) + DiagramBlockCell.chromeHeight
+        case .diagram: DiagramBlockCell.rowHeight(for: block.props.diagramID.flatMap(diagram),
+                                                  width: Theme.contentColumn(in: table.bounds.width).width - CGFloat(block.depth) * Theme.indentStep)
         default: 36
         }
     }

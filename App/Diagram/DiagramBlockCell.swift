@@ -42,7 +42,22 @@ enum DiagramSandbox {
     }
 }
 
-/// A diagram block: a titled frame around a sandboxed web view.
+/// Laid-out Flow diagrams, kept so that asking a row for its height does not lay the diagram out again.
+@MainActor
+enum FlowScenes {
+    private static var cache: [String: (stamp: Date, scene: FlowScene?)] = [:]
+
+    static func scene(for diagram: Diagram) -> FlowScene? {
+        if let hit = cache[diagram.id], hit.stamp == diagram.updatedAt { return hit.scene }
+        let scene = try? FlowScene(source: diagram.source)
+        if cache.count > 200 { cache.removeAll() }
+        cache[diagram.id] = (diagram.updatedAt, scene)
+        return scene
+    }
+}
+
+/// A diagram block: a sandboxed web view. A Flow diagram sits straight on the page at its own size;
+/// the older html and steps formats keep a titled frame at the height their author gave.
 /// Web views exist only for rows on screen, because the table reuses a handful of cells.
 final class DiagramBlockCell: FlippedCell, WKNavigationDelegate {
     private let frameView = NSView()
@@ -51,6 +66,7 @@ final class DiagramBlockCell: FlippedCell, WKNavigationDelegate {
     private var loadedKey = ""
     private var pendingHTML: String?
     private var depth = 0
+    private var frameless = false
     private var initialLoad: WKNavigation?
 
     override init(frame: NSRect) {
@@ -68,6 +84,9 @@ final class DiagramBlockCell: FlippedCell, WKNavigationDelegate {
 
     func configure(_ block: Block, diagram: Diagram?) {
         depth = block.depth
+        frameless = diagram?.format == .flow
+        frameView.layer?.borderWidth = frameless ? 0 : 1
+        titleLabel.isHidden = frameless
         frameView.layer?.borderColor = Theme.divider.cgColor
         titleLabel.textColor = Theme.secondary
         titleLabel.stringValue = diagram?.title ?? "Diagram unavailable"
@@ -106,10 +125,23 @@ final class DiagramBlockCell: FlippedCell, WKNavigationDelegate {
         frameView.frame = NSRect(x: x, y: 6, width: column.width - (x - column.x), height: bounds.height - 12)
         // Layer-backed subviews of a non-flipped view: measure from the bottom.
         titleLabel.frame = NSRect(x: 12, y: frameView.bounds.height - 26, width: frameView.bounds.width - 24, height: 16)
-        webView?.frame = NSRect(x: 1, y: 1, width: frameView.bounds.width - 2, height: frameView.bounds.height - 32)
+        webView?.frame = frameless ? frameView.bounds
+            : NSRect(x: 1, y: 1, width: frameView.bounds.width - 2, height: frameView.bounds.height - 32)
     }
 
-    static let chromeHeight: CGFloat = 44
+    /// The row's margin above and below the diagram.
+    private static let margin: CGFloat = 12
+    /// The title bar and border of a framed (html or steps) diagram.
+    private static let frameChrome: CGFloat = 32
+
+    /// A Flow diagram is as tall as its drawing at this width; it shrinks to fit a narrow column and never grows.
+    static func rowHeight(for diagram: Diagram?, width: CGFloat) -> CGFloat {
+        guard let diagram else { return 120 + margin + frameChrome }
+        if diagram.format == .flow, let scene = FlowScenes.scene(for: diagram) {
+            return scene.displayHeight(forWidth: width) + margin
+        }
+        return diagram.height + margin + frameChrome
+    }
 
     // Only the document we load ourselves may be shown; links and redirects go nowhere.
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
