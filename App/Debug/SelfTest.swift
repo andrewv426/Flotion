@@ -77,7 +77,13 @@ enum SelfTest {
         type("[] "); type("a task")
         key(newline); key(newline)
         type("---")
+        // The empty block shows its hint, and plain typing (no Markdown shortcut, so no
+        // row refresh) must repaint the view so the hint does not stay under the text.
+        await pause()
+        check(responder()?.drewPlaceholder == true, "an empty focused block shows its placeholder")
         type("Last line")
+        await pause()
+        check(responder()?.drewPlaceholder == false, "typing into an empty block clears its placeholder")
         await pause()
 
         let blocks = model.editor?.blocks ?? []
