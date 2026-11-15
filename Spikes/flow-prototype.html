@@ -1,0 +1,1427 @@
+<!doctype html>
+<!--
+  Flow: a throwaway spike for the look and motion of the diagram language.
+  Everything here (parser, layout, arrow routing, player) is JavaScript so it can be judged in a browser.
+  The shipping pipeline is meant to live in Swift in FlotionCore; only the player would stay in the web view.
+
+  Three variants share one parser, layout and player:
+    Clean   the strict language, one fixed visual system
+    Sketch  the same strict language drawn as if by hand
+    Custom  the language opened up with per-diagram and per-element styling
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flow prototype</title>
+<style>
+:root {
+  --bg: #FFFFFF; --text: #37352F; --muted: #787774; --chrome: #FBFBFA; --ink: #37352F;
+  --line: rgba(55,53,47,.48); --node-border: rgba(55,53,47,.24); --node-fill: #FFFFFF;
+  --group-fill: #F7F7F5; --soft: rgba(55,53,47,.06); --border: rgba(55,53,47,.12);
+  --accent: #2383E2; --good: #448361; --warn: #D9730D; --bad: #D44C47;
+  --font: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --hand: "Bradley Hand", "Noteworthy", "Chalkboard SE", "Comic Sans MS", cursive;
+}
+:root[data-theme="dark"] {
+  --bg: #191919; --text: rgba(255,255,255,.84); --muted: rgba(255,255,255,.48); --chrome: #202020; --ink: rgba(255,255,255,.84);
+  --line: rgba(255,255,255,.42); --node-border: rgba(255,255,255,.20); --node-fill: #262626;
+  --group-fill: #202020; --soft: rgba(255,255,255,.07); --border: rgba(255,255,255,.12);
+  --accent: #4A9FF0; --good: #5BB98C; --warn: #F0A04B; --bad: #F2766F;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px;
+       -webkit-font-smoothing: antialiased; display: flex; flex-direction: column; }
+button { font: inherit; color: inherit; }
+
+/* Prototype chrome */
+.bar { display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-bottom: 1px solid var(--border);
+       background: var(--chrome); flex-wrap: wrap; }
+.bar strong { font-weight: 650; }
+.bar .sub { color: var(--muted); margin-right: auto; }
+.bar .cap-label { color: var(--muted); font-size: 12px; }
+.seg { display: flex; gap: 2px; background: var(--soft); border-radius: 7px; padding: 2px; flex-wrap: wrap; }
+.seg button, .ghost { all: unset; cursor: pointer; padding: 4px 10px; border-radius: 5px; font-size: 13px; color: var(--muted); }
+.seg button[aria-pressed="true"] { background: var(--bg); color: var(--text); box-shadow: 0 0 0 1px var(--border); }
+.ghost:hover { background: var(--soft); color: var(--text); }
+main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(320px, 400px) 1fr; }
+.editor { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); background: var(--chrome); }
+.pane-title { display: flex; justify-content: space-between; gap: 12px; padding: 10px 14px 6px; font-size: 12px; color: var(--muted); }
+.code { flex: 1; min-height: 160px; display: flex; overflow: hidden; }
+#gutter { margin: 0; padding: 4px 8px 4px 14px; text-align: right; color: var(--muted); opacity: .7; overflow: hidden; user-select: none; }
+#gutter span { display: block; }
+#gutter .bad { color: var(--bad); font-weight: 700; opacity: 1; }
+#src { flex: 1; border: 0; outline: 0; resize: none; background: transparent; color: var(--text); padding: 4px 14px 4px 4px;
+       white-space: pre; overflow: auto; tab-size: 2; }
+#gutter, #src { font: 12.5px/1.6 var(--mono); }
+#errors { font: 12px/1.5 var(--mono); color: var(--bad); padding: 0 14px; }
+#errors div { padding: 6px 0; border-top: 1px solid var(--border); }
+.cheat { border-top: 1px solid var(--border); padding: 8px 14px 12px; font-size: 12px; color: var(--muted); }
+.cheat summary { cursor: pointer; }
+.cheat pre { font: 11.5px/1.55 var(--mono); margin: 8px 0 0; white-space: pre-wrap; color: var(--text); }
+.page-wrap { overflow: auto; min-width: 0; }
+.page { max-width: 760px; margin: 0 auto; padding: 56px 32px 96px; }
+.page h1 { font-size: 32px; line-height: 1.2; margin: 0 0 14px; font-weight: 700; letter-spacing: -.01em; }
+.page p { font-size: 16px; line-height: 1.6; margin: 0 0 4px; }
+@media (max-width: 860px) {
+  main { grid-template-columns: 1fr; grid-auto-rows: min-content; overflow: auto; }
+  .page-wrap { order: -1; overflow: visible; } .page { padding: 32px 16px 40px; }
+  .editor { border-right: 0; border-top: 1px solid var(--border); } .code { height: 320px; flex: none; }
+}
+
+/* ---- The diagram itself. This part is the design under review. ---- */
+.fig { margin: 18px 0 14px; outline: none; }
+.stage { display: block; margin: 0 auto; max-width: 100%; height: auto; overflow: visible; }
+.stage.no-anim, .stage.no-anim *, .still .stage, .still .stage *, .still .cap * { transition: none !important; }
+
+.group rect { fill: var(--group-fill); }
+.group text { fill: var(--muted); font-size: var(--tag, 12px); font-weight: 500; }
+.group, .node, .edge, .elabel { transition: opacity .3s ease; }
+.off { opacity: 0; }
+.dim { opacity: .28; }
+
+.node .inner { transform-box: fill-box; transform-origin: center; transition: transform .38s cubic-bezier(.2,.8,.2,1); }
+.node.off .inner { transform: scale(.94); }
+.shape { fill: var(--nfill, var(--node-fill)); stroke: var(--nstroke, var(--node-border)); stroke-width: var(--sw, 1.25px);
+         transition: fill .3s ease, stroke .3s ease; }
+.node.b-dashed .shape { stroke-dasharray: 5 4; }
+.node.b-none .shape { stroke: none; }
+.ring { fill: none; stroke: var(--accent); stroke-width: 1.5; opacity: 0; pointer-events: none; }
+.label { fill: var(--ntext, var(--text)); font-weight: var(--fw, 500); transition: transform .3s ease, opacity .14s ease, fill .3s ease; }
+.tag { fill: var(--ntext, var(--muted)); font-size: var(--tag, 12px); transition: opacity .14s ease, fill .3s ease; }
+.node[data-tone="accent"] { --tone: var(--accent); }
+.node[data-tone="good"] { --tone: var(--good); }
+.node[data-tone="warn"] { --tone: var(--warn); }
+.node[data-tone="bad"] { --tone: var(--bad); }
+.node[data-tone]:not([data-tone="muted"]) .shape { stroke: var(--tone); fill: color-mix(in srgb, var(--tone) 10%, var(--nfill, var(--node-fill))); }
+.node[data-tone]:not([data-tone="muted"]) .tag { fill: var(--ntext, var(--tone)); }
+.node[data-tone="muted"] .shape { stroke-dasharray: 3 3; }
+.node[data-tone="muted"] .label { fill: var(--muted); }
+
+.line { fill: none; stroke: var(--ec, var(--line)); stroke-width: var(--ew, var(--sw, 1.25px)); stroke-linecap: round;
+        transition: stroke .25s ease, stroke-width .25s ease, stroke-dashoffset .5s ease .1s; }
+.edge.solid .line { stroke-dasharray: 1; stroke-dashoffset: 0; }
+.edge.solid.off .line { stroke-dashoffset: 1; }
+.edge.dashed .line { stroke-dasharray: 4 4; }
+.edge.dotted .line { stroke-dasharray: .1 4.5; }
+.head { fill: var(--ec, var(--line)); stroke: var(--ec, var(--line)); stroke-width: 1; stroke-linejoin: round; opacity: 0;
+        transition: opacity .15s ease, fill .25s ease, stroke .25s ease; }
+.edge.at-hi .head.hi, .edge.at-lo .head.lo { opacity: 1; transition: opacity .25s ease .3s, fill .25s ease, stroke .25s ease; }
+.edge.live .line { stroke: var(--accent); stroke-width: calc(var(--ew, var(--sw, 1.25px)) + .35px); }
+.edge.live .head { fill: var(--accent); stroke: var(--accent); }
+.elabel { fill: var(--ec, var(--muted)); font-size: var(--edge, 12.5px); font-weight: var(--fw, 500);
+          paint-order: stroke; stroke: var(--knock); stroke-width: 6px; stroke-linejoin: round; }
+.elabel.live { fill: var(--accent); }
+.token { fill: var(--accent); }
+
+/* Sketch: the fill stays a plain shape; the outline is pen strokes laid over it. */
+.sk, .gsk, .hatch { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.sk { stroke: var(--ink); stroke-width: 1.2; transition: stroke .3s ease; }
+.gsk { stroke: var(--muted); stroke-width: 1.1; stroke-dasharray: 7 6; opacity: .75; }
+.hatch { stroke: var(--tone, transparent); stroke-width: 1; opacity: 0; transition: opacity .35s ease; }
+.look-sketch .shape { stroke: none; fill: var(--bg); }
+.look-sketch .node[data-tone]:not([data-tone="muted"]) .shape { stroke: none; fill: var(--bg); }
+.look-sketch .node[data-tone]:not([data-tone="muted"]) .sk { stroke: var(--tone); }
+.look-sketch .node[data-tone]:not([data-tone="muted"]) .hatch { opacity: .34; }
+.look-sketch .node[data-tone="muted"] .sk { stroke-dasharray: 4 5; opacity: .55; }
+.look-sketch .line { stroke: var(--ink); stroke-width: 1.3; }
+.look-sketch .edge.dashed .line { stroke-dasharray: 6 6; }
+.look-sketch .edge .head { fill: none; stroke: var(--ink); stroke-width: 1.4; stroke-linecap: round; }
+.look-sketch .edge.live .line, .look-sketch .edge.live .head { stroke: var(--accent); }
+.look-sketch .elabel { fill: var(--ink); }
+.look-sketch .elabel.live { fill: var(--accent); }
+.look-sketch .tag { fill: var(--muted); }
+.look-sketch .cap { font-family: var(--hand); }
+.look-sketch .cap-title { font-size: 19px; font-weight: 700; }
+.look-sketch .cap-text { font-size: 16px; }
+
+.cap { text-align: center; padding: 10px 16px 0; min-height: 50px; }
+.cap-title { font-size: 14px; font-weight: 600; transition: opacity .14s ease; }
+.cap-text { font-size: 13px; line-height: 1.45; color: var(--muted); margin-top: 2px; transition: opacity .14s ease; }
+.controls { position: relative; display: flex; align-items: center; justify-content: center; gap: 8px; height: 30px; margin-top: 2px; }
+.controls button { all: unset; cursor: pointer; }
+.controls .nav { width: 24px; height: 24px; border-radius: 5px; display: grid; place-items: center; color: var(--muted);
+       opacity: 0; transition: opacity .18s ease, background .12s ease; }
+.controls .nav svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.controls .nav.play svg { fill: currentColor; stroke: none; }
+.controls .nav:hover { background: var(--soft); color: var(--text); }
+.controls .nav[disabled] { visibility: hidden; }
+.fig:hover .controls .nav, .fig:focus-within .controls .nav { opacity: 1; }
+.dots { display: flex; gap: 5px; align-items: center; }
+.controls .dot { width: 6px; height: 6px; border-radius: 3px; background: var(--node-border); transition: width .25s ease, background .25s ease; }
+.controls .dot.on { width: 16px; background: var(--accent); }
+@media (hover: none) { .controls .nav { opacity: 1; } }
+</style>
+</head>
+<body>
+<header class="bar">
+  <strong>Flow</strong><span class="sub">diagram language prototype</span>
+  <span class="cap-label">Variant</span><div class="seg" id="looks"></div>
+  <span class="cap-label">Example</span><div class="seg" id="examples"></div>
+  <button class="ghost" id="motion" aria-label="Turn motion on or off">Motion on</button>
+  <button class="ghost" id="theme" aria-label="Switch between light and dark">Dark</button>
+</header>
+<main>
+  <section class="editor">
+    <div class="pane-title"><span>Source — edit it, the page updates</span><span id="stats"></span></div>
+    <div class="code"><pre id="gutter"></pre><textarea id="src" spellcheck="false" wrap="off" aria-label="Diagram source"></textarea></div>
+    <div id="errors" role="status"></div>
+    <details class="cheat"><summary>Grammar</summary><pre id="grammar"></pre></details>
+  </section>
+  <section class="page-wrap">
+    <article class="page">
+      <h1 id="ptitle"></h1>
+      <p id="pintro"></p>
+      <figure class="fig" id="fig" tabindex="0"></figure>
+      <p id="poutro"></p>
+    </article>
+  </section>
+</main>
+
+<script>
+'use strict';
+
+// ---------------------------------------------------------------- variants
+
+const SANS = 'system-ui, -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif';
+const FAMILIES = {
+  sans: SANS,
+  mono: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
+  serif: '"New York", ui-serif, Georgia, serif',
+  rounded: 'ui-rounded, "SF Pro Rounded", ' + SANS,
+  hand: '"Bradley Hand", "Noteworthy", "Chalkboard SE", "Comic Sans MS", cursive',
+};
+const LOOKS = { clean: 'Clean', sketch: 'Sketch', custom: 'Custom' };
+let look = 'clean';
+
+/// The numbers one drawing is made with. Clean and Sketch fix all of them; Custom reads them from the source.
+function theme(m) {
+  const st = look === 'custom' ? m.style : {};
+  const family = st.font || (look === 'sketch' ? 'hand' : 'sans');
+  const type = family === 'hand' ? { label: 17, tag: 14, edge: 14.5, weight: 700 }
+             : family === 'mono' ? { label: 13, tag: 11.5, edge: 12, weight: 500 }
+             : { label: 14, tag: 12, edge: 12.5, weight: 500 };
+  return { ...type, family: FAMILIES[family], sketch: look === 'sketch',
+           corner: st.corner != null ? st.corner : look === 'sketch' ? 3 : 8,
+           stroke: st.stroke != null ? st.stroke : 1.25, curve: st.edges || 'curved', accent: st.accent || null };
+}
+
+const GRAMMAR = `flow right | down
+id: Label {shape: box | pill | circle | diamond | database}
+a -> b: label {style: dashed}
+group id "Title" {  …nodes…  }
+
+step "Title": caption
+  send a -> b: label     a token travels the edge (this step only)
+  focus a, b             dims everything else (this step only)
+  tag a, b: status       small status line in the node
+  mark a: accent | good | warn | bad | muted | none
+  set a: New label
+  hide a, b   /   show a, b
+  x: New node            declared in a step = appears at that step
+  a -> x                 same for edges`;
+const GRAMMAR_CUSTOM = `
+
+Custom adds
+style {
+  accent: colour      corner: 0-24      stroke: 0.5-4
+  font: sans | mono | serif | rounded | hand
+  edges: curved | straight | elbow
+}
+node {fill, stroke, text: colour, icon: 🛒, size: s | m | l,
+      border: solid | dashed | none}
+edge {color: colour, width: 0.5-4, style: solid | dashed | dotted,
+      arrow: end | both | none}
+mark a: any colour
+colour = #hex or red orange yellow green teal blue purple pink gray`;
+
+// ---------------------------------------------------------------- examples
+
+const EXAMPLES = [
+  { name: 'Handshake', title: 'TCP three-way handshake',
+    intro: 'Before any data moves, the two ends agree that both can send and receive. It takes three packets.',
+    outro: 'After the third packet both sides hold an open connection and can start sending data.',
+    source: `flow right
+
+client: Client
+server: Server
+client -> server
+
+step "SYN": The client asks to open a connection.
+  send client -> server: SYN
+  tag client: SYN sent
+  tag server: listening
+
+step "SYN-ACK": The server acknowledges and asks back.
+  send server -> client: SYN-ACK
+  tag server: SYN received
+
+step "ACK": The client confirms. The connection is open.
+  send client -> server: ACK
+  tag client, server: established
+  mark client, server: good
+` },
+  { name: 'Cache', title: 'Read-through cache',
+    intro: 'The feed endpoint checks Redis first and only goes to Postgres when the key is missing.',
+    outro: 'Every later request for the same key stops at Redis until the entry expires.',
+    source: `flow right
+
+user: Browser {shape: pill}
+api: API
+group data "Storage" {
+  cache: Redis {shape: database}
+  db: Postgres {shape: database}
+}
+user -> api
+api -> cache
+api -> db
+
+step "Request": The browser asks the API for the feed.
+  send user -> api: GET /feed
+
+step "Cache miss": Redis has nothing under this key yet.
+  focus api, cache
+  send api -> cache: get feed:42
+  tag cache: miss
+  mark cache: warn
+
+step "Query": The API falls back to the database.
+  focus api, db
+  send api -> db: select
+  tag db: 38 ms
+
+step "Fill": The result is written to the cache on the way out.
+  focus api, cache
+  send api -> cache: set feed:42
+  tag cache: warm
+  mark cache: good
+
+step "Respond": The browser gets its feed.
+  send api -> user: 200 OK
+` },
+  { name: 'Pipeline', title: 'What happens on push',
+    intro: 'Each push runs the same path. A failing test sends the change back instead of forward.',
+    outro: 'Nothing reaches production without passing through the same gate.',
+    source: `flow down
+
+push: git push {shape: pill}
+build: Build
+test: Tests
+gate: Pass? {shape: diamond}
+deploy: Deploy
+fix: Fix
+push -> build
+build -> test
+test -> gate
+gate -> deploy: yes
+gate -> fix: no
+fix -> build {style: dashed}
+
+step "Push": A commit lands on the branch.
+  mark push: accent
+
+step "Build and test": CI compiles the change and runs the suite.
+  mark push: none
+  send push -> build
+  send build -> test
+  tag build: 1m 12s
+
+step "Red": Two tests fail, so the gate sends the change back.
+  send test -> gate
+  send gate -> fix
+  tag test: 2 failed
+  mark test, gate: bad
+
+step "Retry": The fix goes through the same build.
+  send fix -> build
+  tag test: running
+  mark test, gate: none
+
+step "Green": Everything passes and the change ships.
+  send test -> gate
+  send gate -> deploy
+  tag test: 214 passed
+  mark test, gate, deploy: good
+  mark fix: muted
+` },
+  { name: 'Growth', title: 'How the backend grew',
+    intro: 'The system started as one app and one database. Each piece was added when something specific started to hurt.',
+    outro: 'The layout is computed once for the whole diagram, so earlier pieces stay put as new ones arrive.',
+    source: `flow right
+
+app: App
+db: Postgres {shape: database}
+app -> db
+
+step "One box": An app and a database. Enough for the first year.
+
+step "Cache": Reads got slow, so a cache went in front of the database.
+  cache: Redis {shape: database}
+  app -> cache: read
+  mark cache: accent
+
+step "Queue": Slow work moved off the request path.
+  mark cache: none
+  queue: Jobs {shape: pill}
+  worker: Worker
+  app -> queue: enqueue
+  queue -> worker
+  worker -> db: write
+  mark queue, worker: accent
+
+step "Replica": Reporting queries got their own copy of the data.
+  mark queue, worker: none
+  replica: Replica {shape: database}
+  db -> replica: stream {style: dashed}
+  mark replica: accent
+` },
+  { name: 'Checkout', custom: true, title: 'Taking a payment',
+    intro: 'An order touches four systems. Here each one is drawn in its own colours, with a typeface and edge style chosen for this diagram alone.',
+    outro: 'Everything above is set in the source: the purple accent, the right-angle edges, the rounded typeface, the icons, each fill. Another diagram on the same page could pick entirely different ones.',
+    source: `flow right
+
+style {
+  accent: #7C3AED
+  corner: 14
+  stroke: 1.5
+  font: rounded
+  edges: elbow
+}
+
+web: Checkout {icon: 🛒, fill: #EDE9FE, stroke: #7C3AED, text: #4C1D95}
+api: Orders API {size: l}
+group pay "Money" {
+  stripe: Stripe {shape: pill, fill: #635BFF, stroke: #635BFF, text: #FFFFFF}
+  ledger: Ledger {shape: database, fill: #FEF3C7, stroke: #D97706, text: #78350F}
+}
+mail: Receipts {icon: ✉️, border: dashed}
+
+web -> api: POST /orders {width: 2}
+api -> stripe: charge {color: #635BFF}
+api -> ledger: record {color: #D97706, style: dotted}
+api -> mail {arrow: none}
+
+step "Order": The shopper presses Pay.
+  send web -> api: POST /orders
+
+step "Charge": The card is charged before anything is written down.
+  focus api, stripe
+  send api -> stripe: charge $48
+  tag stripe: authorised
+
+step "Record": Only a successful charge reaches the ledger.
+  focus api, ledger
+  send api -> ledger: record
+  tag ledger: +$48.00
+  mark ledger: #16A34A
+
+step "Receipt": The email goes out last, off the critical path.
+  send api -> mail: queue
+  mark mail: teal
+` },
+];
+
+// ---------------------------------------------------------------- parser
+
+const ID = '[A-Za-z_][\\w-]*';
+const RE_NODE = new RegExp(`^(${ID})\\s*(?::\\s*(.*))?$`);
+const RE_EDGE = new RegExp(`^(${ID}(?:\\s*->\\s*${ID})+)\\s*(?::\\s*(.*))?$`);
+const RE_PAIR = new RegExp(`^(${ID})\\s*->\\s*(${ID})$`);
+const RE_GROUP = new RegExp(`^group\\s+(${ID})\\s*:?\\s*(.*?)\\s*\\{$`);
+const VERBS = ['show', 'hide', 'set', 'tag', 'mark', 'send', 'focus'];
+const RESERVED = new Set([...VERBS, 'flow', 'group', 'step', 'style']);
+const SHAPES = ['box', 'pill', 'circle', 'diamond', 'database'];
+const SHAPE_ALIAS = { cylinder: 'database', db: 'database', rect: 'box', rectangle: 'box', square: 'box', rounded: 'box',
+                      oval: 'pill', ellipse: 'pill', stadium: 'pill', rhombus: 'diamond', decision: 'diamond' };
+const TONES = ['accent', 'good', 'warn', 'bad', 'muted', 'none'];
+const TONE_ALIAS = { green: 'good', success: 'good', ok: 'good', red: 'bad', error: 'bad', danger: 'bad', yellow: 'warn',
+                     orange: 'warn', warning: 'warn', blue: 'accent', highlight: 'accent', gray: 'muted', grey: 'muted', clear: 'none' };
+const NODE_EXTRA = ['fill', 'stroke', 'text', 'icon', 'size', 'border'];
+const EDGE_EXTRA = ['color', 'width', 'arrow'];
+const STYLE_KEYS = ['accent', 'corner', 'stroke', 'font', 'edges'];
+const NAMED = { red: '#E5484D', orange: '#F76B15', yellow: '#E2A336', green: '#30A46C', teal: '#12A594', blue: '#3E63DD',
+                purple: '#8E4EC6', pink: '#D6409F', gray: '#8B8D98', grey: '#8B8D98', black: '#1C1C1C', white: '#FFFFFF' };
+const RE_HEX = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i;
+const colour = v => RE_HEX.test(v) ? v : NAMED[v.toLowerCase()] || null;
+const COLOUR_HELP = 'colours are hex like `#2383E2` or one of ' + Object.keys(NAMED).filter(k => k !== 'grey').join(', ');
+
+function lev(a, b) {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++)
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[a.length][b.length];
+}
+function closest(word, pool) {
+  let best = null, bestD = word.length <= 3 ? 2 : 3;
+  for (const p of pool) { const d = lev(word.toLowerCase(), p.toLowerCase()); if (d < bestD) { bestD = d; best = p; } }
+  return best;
+}
+/// `#` starts a comment. In the open language a `#` that begins a hex colour is left alone.
+function stripComment(s, open) {
+  let quoted = false;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '"') quoted = !quoted;
+    else if (s[i] === '#' && !quoted && (i === 0 || /\s/.test(s[i - 1]))) {
+      if (open && /^#([0-9a-f]{6}|[0-9a-f]{3})(?![0-9a-z])/i.test(s.slice(i))) continue;
+      return s.slice(0, i);
+    }
+  }
+  return s;
+}
+function unquote(s) {
+  s = s.trim();
+  return s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"' ? s.slice(1, -1) : s;
+}
+
+/// `open` turns on the Custom variant's extra syntax. Without it the same syntax is an error, not ignored.
+function parse(src, open) {
+  const errors = [];
+  const fail = (line, msg) => errors.push({ line, msg });
+  const m = { dir: 'right', style: {}, nodes: [], byId: new Map(), edges: [], groups: [], groupById: new Map(), steps: [] };
+  let group = null, step = null, inStyle = false;
+
+  const knownNode = (id, line) => {
+    if (m.byId.has(id)) return true;
+    const guess = closest(id, [...m.byId.keys()]);
+    fail(line, `unknown node \`${id}\`` + (guess ? `, did you mean \`${guess}\`?` : `. Declare it first: \`${id}: Label\``));
+    return false;
+  };
+  const findEdge = (a, b) => {
+    let i = m.edges.findIndex(e => e.from === a && e.to === b);
+    if (i >= 0) return { i, against: false };
+    i = m.edges.findIndex(e => e.from === b && e.to === a);
+    return i >= 0 ? { i, against: true } : null;
+  };
+  const targets = (str, line, allowEdges) => {
+    const out = [];
+    const parts = str.split(',').map(s => s.trim()).filter(Boolean);
+    if (!parts.length) fail(line, 'name at least one node');
+    for (const part of parts) {
+      const pair = part.match(RE_PAIR);
+      if (pair) {
+        if (!allowEdges) { fail(line, 'this takes nodes or groups, not edges'); continue; }
+        if (!knownNode(pair[1], line) || !knownNode(pair[2], line)) continue;
+        const found = findEdge(pair[1], pair[2]);
+        if (found) out.push({ kind: 'edge', i: found.i });
+        else fail(line, `no edge between \`${pair[1]}\` and \`${pair[2]}\``);
+      } else if (m.byId.has(part)) out.push({ kind: 'node', id: part });
+      else if (m.groupById.has(part)) out.push({ kind: 'group', id: part });
+      else {
+        const guess = closest(part, [...m.byId.keys(), ...m.groupById.keys()]);
+        fail(line, `unknown node or group \`${part}\`` + (guess ? `, did you mean \`${guess}\`?` : ''));
+      }
+    }
+    return out;
+  };
+  const number = (value, lo, hi, what, line) => {
+    const v = parseFloat(value);
+    if (isNaN(v) || v < lo || v > hi) { fail(line, `${what} must be a number from ${lo} to ${hi}`); return null; }
+    return v;
+  };
+  const oneOf = (value, options, what, line) => {
+    const v = value.toLowerCase();
+    if (options.includes(v)) return v;
+    const guess = closest(v, options);
+    fail(line, `${what} must be one of ${options.join(', ')}` + (guess ? `, did you mean \`${guess}\`?` : ''));
+    return null;
+  };
+  const paint = (value, what, line) => {
+    const c = colour(value);
+    if (!c) fail(line, `\`${value}\` is not a colour for ${what}: ${COLOUR_HELP}`);
+    return c;
+  };
+  const setStyle = (part, line) => {
+    const kv = part.match(/^([A-Za-z]+)\s*:\s*(.+)$/);
+    if (!kv) { fail(line, `style settings are written \`key: value\`, got \`${part}\``); return; }
+    const key = kv[1].toLowerCase(), value = kv[2].trim();
+    if (key === 'accent') { const c = paint(value, 'accent', line); if (c) m.style.accent = c; }
+    else if (key === 'corner') { const v = number(value, 0, 24, 'corner', line); if (v != null) m.style.corner = v; }
+    else if (key === 'stroke') { const v = number(value, .5, 4, 'stroke', line); if (v != null) m.style.stroke = v; }
+    else if (key === 'font') { const v = oneOf(value, Object.keys(FAMILIES), 'font', line); if (v) m.style.font = v; }
+    else if (key === 'edges') { const v = oneOf(value, ['curved', 'straight', 'elbow'], 'edges', line); if (v) m.style.edges = v; }
+    else { const guess = closest(key, STYLE_KEYS); fail(line, `unknown style setting \`${key}\`` + (guess ? `, did you mean \`${guess}\`?` : `. Settings are ${STYLE_KEYS.join(', ')}`)); }
+  };
+
+  src.split('\n').forEach((raw, k) => {
+    const line = k + 1;
+    let s = stripComment(raw, open).trim();
+    if (!s) return;
+    if (inStyle) {
+      if (s === '}') { inStyle = false; return; }
+      if (open) s.split(';').map(x => x.trim()).filter(Boolean).forEach(part => setStyle(part, line));
+      return;
+    }
+    if (s === '}') { if (!group) fail(line, '`}` without an open group'); group = null; return; }
+
+    const word = (s.match(/^[A-Za-z_][\w-]*/) || [''])[0];
+    const keyword = RESERVED.has(word) && !/^\s*:/.test(s.slice(word.length)) ? word : null;
+    if (RESERVED.has(word) && !keyword) { fail(line, `\`${word}\` is a reserved word and cannot be a node id`); return; }
+
+    if (keyword === 'style') {
+      const inline = s.match(/^style\s*\{(.*)\}$/);
+      if (!open) fail(line, 'the `style` block needs the Custom variant');
+      if (inline) { if (open) inline[1].split(';').map(x => x.trim()).filter(Boolean).forEach(part => setStyle(part, line)); }
+      else if (/^style\s*\{$/.test(s)) inStyle = true;
+      else fail(line, 'write `style {` then one `key: value` per line, then `}`');
+      return;
+    }
+    if (keyword === 'flow') {
+      const dir = s.slice(4).trim().toLowerCase();
+      const alias = { lr: 'right', tb: 'down', td: 'down', horizontal: 'right', vertical: 'down' }[dir];
+      if (dir === 'right' || dir === 'down') m.dir = dir;
+      else fail(line, 'direction must be `right` or `down`' + (alias ? `, did you mean \`flow ${alias}\`?` : ''));
+      return;
+    }
+    if (keyword === 'group') {
+      const g = s.match(RE_GROUP);
+      if (!g) { fail(line, 'write a group as `group id "Title" {` and close it with `}` on its own line'); return; }
+      if (group) { fail(line, 'groups cannot be nested'); return; }
+      if (step) { fail(line, 'declare groups before the first step'); return; }
+      if (m.groupById.has(g[1]) || m.byId.has(g[1])) { fail(line, `\`${g[1]}\` is already declared`); return; }
+      group = { id: g[1], title: unquote(g[2]) || g[1], members: [], line };
+      m.groups.push(group); m.groupById.set(group.id, group);
+      return;
+    }
+    if (keyword === 'step') {
+      if (group) { fail(line, `close group \`${group.id}\` with \`}\` before the first step`); group = null; }
+      const rest = s.slice(4).trim();
+      let title, caption = '';
+      const q = rest.match(/^"([^"]*)"\s*(?::\s*(.*))?$/);
+      if (q) { title = q[1]; caption = q[2] || ''; }
+      else { const c = rest.indexOf(': '); title = c >= 0 ? rest.slice(0, c) : rest.replace(/:$/, ''); caption = c >= 0 ? rest.slice(c + 2) : ''; }
+      if (!title.trim()) fail(line, 'a step needs a title: `step "Title": caption`');
+      step = { title: title.trim(), caption: caption.trim(), ops: [], line };
+      m.steps.push(step);
+      return;
+    }
+    if (keyword) {
+      if (!step) { fail(line, `\`${keyword}\` only works inside a step`); return; }
+      const body = s.slice(keyword.length).trim();
+      const colon = body.indexOf(':');
+      const head = colon >= 0 ? body.slice(0, colon).trim() : body;
+      const value = colon >= 0 ? unquote(body.slice(colon + 1)) : null;
+      switch (keyword) {
+        case 'show': case 'hide': step.ops.push({ v: keyword, targets: targets(body, line, true) }); break;
+        case 'focus': step.ops.push({ v: 'focus', targets: targets(body, line, false) }); break;
+        case 'set':
+          if (!value) { fail(line, 'write `set id: New label`'); break; }
+          if (knownNode(head, line)) { m.byId.get(head).labels.push(value); step.ops.push({ v: 'set', id: head, text: value }); }
+          break;
+        case 'tag': {
+          const t = targets(head, line, false);
+          for (const x of t) for (const id of x.kind === 'group' ? m.groupById.get(x.id).members : [x.id]) m.byId.get(id).tags.push(value || '');
+          step.ops.push({ v: 'tag', targets: t, text: value || '' });
+          break;
+        }
+        case 'mark': {
+          const tone = (value || '').toLowerCase();
+          if (TONES.includes(tone)) { step.ops.push({ v: 'mark', targets: targets(head, line, false), tone }); break; }
+          if (open && colour(tone)) { step.ops.push({ v: 'mark', targets: targets(head, line, false), tone: 'custom', color: colour(tone) }); break; }
+          const guess = TONE_ALIAS[tone] || closest(tone, TONES);
+          fail(line, `tone must be one of ${TONES.join(', ')}` + (open ? ' or a colour' : '') + (guess ? `, did you mean \`${guess}\`?` : ''));
+          break;
+        }
+        case 'send': {
+          const pair = head.match(RE_PAIR);
+          if (!pair) { fail(line, 'write `send a -> b: label`'); break; }
+          if (!knownNode(pair[1], line) || !knownNode(pair[2], line)) break;
+          const found = findEdge(pair[1], pair[2]);
+          if (!found) { fail(line, `no edge between \`${pair[1]}\` and \`${pair[2]}\`. Declare \`${pair[1]} -> ${pair[2]}\` first`); break; }
+          if (value) m.edges[found.i].labels.push(value);
+          step.ops.push({ v: 'send', i: found.i, against: found.against, label: value || null, to: pair[2] });
+          break;
+        }
+      }
+      return;
+    }
+
+    // Declarations: an optional {key: value} block, then an edge or a node.
+    const attrs = {};
+    const block = s.match(/\{([^{}]*)\}\s*$/);
+    if (block && (s.slice(0, block.index).split('"').length - 1) % 2 === 0) {
+      s = s.slice(0, block.index).trim();
+      for (const part of block[1].split(/[,;]/).map(x => x.trim()).filter(Boolean)) {
+        const kv = part.match(/^([A-Za-z]+)\s*:\s*(.+)$/);
+        if (kv) attrs[kv[1].toLowerCase()] = kv[2].trim();
+        else fail(line, `attributes are written \`{key: value}\`, got \`${part}\``);
+      }
+    }
+    const enter = step ? m.steps.length - 1 : -1;
+    const allowed = (key, base, extra, what) => {
+      if (key === base) return true;
+      if (!extra.includes(key)) { fail(line, `${what} take ${open ? [base, ...extra].join(', ') : '`' + base + '`'}, got \`${key}\``); return false; }
+      if (!open) { fail(line, `\`${key}\` needs the Custom variant`); return false; }
+      return true;
+    };
+
+    const edge = s.match(RE_EDGE);
+    if (edge) {
+      const ids = edge[1].split('->').map(x => x.trim());
+      const label = unquote(edge[2] || '');
+      const look = { style: 'solid', color: null, width: null, arrow: 'end' };
+      for (const key of Object.keys(attrs)) {
+        if (!allowed(key, 'style', EDGE_EXTRA, 'edges')) continue;
+        const value = attrs[key];
+        if (key === 'style') look.style = oneOf(value, open ? ['solid', 'dashed', 'dotted'] : ['solid', 'dashed'], 'style', line) || 'solid';
+        else if (key === 'color') look.color = paint(value, 'an edge', line);
+        else if (key === 'width') look.width = number(value, .5, 4, 'width', line);
+        else if (key === 'arrow') look.arrow = oneOf(value, ['end', 'both', 'none'], 'arrow', line) || 'end';
+      }
+      for (let i = 0; i + 1 < ids.length; i++) {
+        const [a, b] = [ids[i], ids[i + 1]];
+        if (!knownNode(a, line) || !knownNode(b, line)) continue;
+        if (a === b) { fail(line, `\`${a}\` cannot point at itself`); continue; }
+        if (m.edges.some(e => e.from === a && e.to === b)) { fail(line, `\`${a} -> ${b}\` is already declared`); continue; }
+        m.edges.push({ from: a, to: b, label, labels: label ? [label] : [], ...look, enter, line });
+      }
+      return;
+    }
+    const node = s.match(RE_NODE);
+    if (node) {
+      const id = node[1];
+      if (m.byId.has(id) || m.groupById.has(id)) { fail(line, `\`${id}\` is already declared on line ${(m.byId.get(id) || m.groupById.get(id)).line}`); return; }
+      const look = { shape: 'box', fill: null, stroke: null, text: null, icon: null, size: 'm', border: 'solid' };
+      for (const key of Object.keys(attrs)) {
+        if (!allowed(key, 'shape', NODE_EXTRA, 'nodes')) continue;
+        const value = attrs[key];
+        if (key === 'shape') {
+          const shape = value.toLowerCase();
+          if (SHAPES.includes(shape)) look.shape = shape;
+          else { const guess = SHAPE_ALIAS[shape] || closest(shape, SHAPES); fail(line, `shape must be one of ${SHAPES.join(', ')}` + (guess ? `, did you mean \`${guess}\`?` : '')); }
+        }
+        else if (key === 'icon') look.icon = value;
+        else if (key === 'size') look.size = oneOf(value, ['s', 'm', 'l'], 'size', line) || 'm';
+        else if (key === 'border') look.border = oneOf(value, ['solid', 'dashed', 'none'], 'border', line) || 'solid';
+        else look[key] = paint(value, 'a node', line);
+      }
+      const label = unquote(node[2] || '') || id;
+      const n = { id, label, labels: [label], tags: [], ...look, group: group ? group.id : null, enter, line };
+      m.nodes.push(n); m.byId.set(id, n);
+      if (group) group.members.push(id);
+      return;
+    }
+    let hint = '';
+    if (/--+>|==+>|-\.->/.test(s)) hint = ' Edges are written `a -> b: label`.';
+    else if (/[\[\(]/.test(s)) hint = ' Nodes are written `id: Label {shape: box}`.';
+    fail(line, 'cannot read this line.' + hint);
+  });
+
+  if (group) fail(group.line, `group \`${group.id}\` is never closed with \`}\``);
+  if (inStyle) fail(1, 'the `style` block is never closed with `}`');
+  if (!m.nodes.length && !errors.length) fail(1, 'the diagram has no nodes');
+  return { model: m, errors };
+}
+
+/// One resolved state per step. State verbs carry forward; effects (send, focus) last one step.
+function buildStates(m) {
+  const count = Math.max(1, m.steps.length), out = [];
+  const hiddenNodes = new Set(), hiddenEdges = new Set(), label = new Map(), tag = new Map(), tone = new Map();
+  const ids = t => t.kind === 'group' ? m.groupById.get(t.id).members : [t.id];
+  for (let i = 0; i < count; i++) {
+    let focus = null;
+    const sends = [];
+    for (const op of m.steps[i] ? m.steps[i].ops : []) {
+      if (op.v === 'show' || op.v === 'hide') for (const t of op.targets) {
+        if (t.kind === 'edge') op.v === 'hide' ? hiddenEdges.add(t.i) : hiddenEdges.delete(t.i);
+        else for (const id of ids(t)) op.v === 'hide' ? hiddenNodes.add(id) : hiddenNodes.delete(id);
+      }
+      else if (op.v === 'set') label.set(op.id, op.text);
+      else if (op.v === 'tag') for (const t of op.targets) for (const id of ids(t)) op.text ? tag.set(id, op.text) : tag.delete(id);
+      else if (op.v === 'mark') for (const t of op.targets) for (const id of ids(t)) op.tone === 'none' ? tone.delete(id) : tone.set(id, op);
+      else if (op.v === 'focus') { focus = focus || new Set(); for (const t of op.targets) for (const id of ids(t)) focus.add(id); }
+      else if (op.v === 'send') sends.push(op);
+    }
+    const nodes = new Map();
+    for (const n of m.nodes) {
+      const t = tone.get(n.id);
+      nodes.set(n.id, { visible: n.enter <= i && !hiddenNodes.has(n.id), dim: !!focus && !focus.has(n.id),
+                        label: label.get(n.id) || n.label, tag: tag.get(n.id) || '', tone: t ? t.tone : null, toneColor: t ? t.color || null : null });
+    }
+    const edges = m.edges.map((e, ei) => {
+      const send = sends.filter(s => s.i === ei).pop() || null;
+      const visible = e.enter <= i && !hiddenEdges.has(ei) && nodes.get(e.from).visible && nodes.get(e.to).visible;
+      return { visible, live: !!send, label: (send && send.label) || e.label, headAtTo: !(send && send.against),
+               dim: !!focus && !send && !(focus.has(e.from) && focus.has(e.to)) };
+    });
+    const groups = m.groups.map(g => ({
+      visible: g.members.some(id => nodes.get(id).visible), dim: !!focus && !g.members.some(id => focus.has(id)) }));
+    out.push({ nodes, edges, groups, sends: sends.filter(s => edges[s.i].visible) });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- layout
+
+const GROUP_PAD = 16, GROUP_TITLE = 20, DB_RY = 6, TIP = 3, HEAD = 8, HEAD_HALF = 3.4, MARGIN = 14;
+const canvas = document.createElement('canvas').getContext('2d');
+const measure = (text, font) => { canvas.font = font; return canvas.measureText(text).width; };
+const even = v => 2 * Math.ceil(v / 2);
+const f = v => Math.round(v * 10) / 10;
+
+/// Layered layout over every element the diagram ever shows, so nothing moves between steps.
+function layout(m, T) {
+  const H = m.dir === 'right', N = m.nodes.length;
+  const font = (weight, size) => `${weight} ${size}px ${T.family}`;
+
+  for (const n of m.nodes) {
+    const k = { s: .86, l: 1.22 }[n.size] || 1, u = k * T.label / 14;
+    n.fontSize = f(T.label * k); n.unit = u;
+    n.show = t => (n.icon ? n.icon + ' ' : '') + t;
+    const text = Math.max(...n.labels.map(t => measure(n.show(t), font(T.weight, n.fontSize))), ...n.tags.map(t => measure(t, font(400, T.tag))), 0);
+    const tagged = n.tags.some(Boolean);
+    let w = Math.max(104 * k, text + 36 * u), h = (tagged ? 58 : 44) * u;
+    if (n.shape === 'pill') w += 8;
+    if (n.shape === 'database') h += 10;
+    if (n.shape === 'diamond') { w = Math.max(116 * k, text + 72 * u); h = (tagged ? 82 : 64) * u; }
+    if (n.shape === 'circle') w = h = Math.max((tagged ? 72 : 60) * u, text + 30 * u);
+    n.w = even(w); n.h = even(h);
+  }
+
+  // Break cycles: an edge that points back up the depth-first tree is laid out reversed.
+  const index = new Map(m.nodes.map((n, i) => [n.id, i]));
+  const outgoing = m.nodes.map(() => []);
+  m.edges.forEach((e, i) => { e.u = index.get(e.from); e.v = index.get(e.to); e.flip = false; outgoing[e.u].push(i); });
+  const seen = new Array(N).fill(0);
+  const visit = u => {
+    seen[u] = 1;
+    for (const ei of outgoing[u]) { const e = m.edges[ei]; if (seen[e.v] === 1) e.flip = true; else if (!seen[e.v]) visit(e.v); }
+    seen[u] = 2;
+  };
+  for (let i = 0; i < N; i++) if (!seen[i]) visit(i);
+  const L = m.edges.map(e => e.flip ? { a: e.v, b: e.u } : { a: e.u, b: e.v });
+
+  // Rank by longest path, then pull lone sources next to what they feed.
+  const rank = new Array(N).fill(0), succ = m.nodes.map(() => []), pred = m.nodes.map(() => []);
+  L.forEach(l => { succ[l.a].push(l.b); pred[l.b].push(l.a); });
+  const waiting = pred.map(p => p.length), queue = [];
+  for (let i = 0; i < N; i++) if (!waiting[i]) queue.push(i);
+  while (queue.length) {
+    const u = queue.shift();
+    for (const v of succ[u]) { rank[v] = Math.max(rank[v], rank[u] + 1); if (--waiting[v] === 0) queue.push(v); }
+  }
+  for (let i = 0; i < N; i++) if (!pred[i].length && succ[i].length) rank[i] = Math.min(...succ[i].map(v => rank[v])) - 1;
+
+  // Items are real nodes plus one dummy per rank a long edge passes through.
+  const items = m.nodes.map((n, i) => ({ node: n, rank: rank[i], rs: H ? n.w : n.h, cs: H ? n.h : n.w, group: n.group, up: [], down: [], c: 0 }));
+  const chains = L.map((l, ei) => {
+    const shared = m.nodes[l.a].group && m.nodes[l.a].group === m.nodes[l.b].group ? m.nodes[l.a].group : null;
+    const chain = [l.a];
+    for (let r = rank[l.a] + 1; r < rank[l.b]; r++) {
+      items.push({ dummy: true, rank: r, rs: 0, cs: 0, group: shared, up: [], down: [], c: 0, edge: ei });
+      chain.push(items.length - 1);
+    }
+    chain.push(l.b);
+    for (let k = 0; k + 1 < chain.length; k++) { items[chain[k]].down.push(chain[k + 1]); items[chain[k + 1]].up.push(chain[k]); }
+    return chain;
+  });
+  const R = Math.max(0, ...items.map(it => it.rank)) + 1;
+  let ranks = Array.from({ length: R }, () => []);
+  items.forEach((it, i) => ranks[it.rank].push(i));
+
+  // Order each rank by the barycenter of its neighbours, keeping group members together.
+  const segs = [];
+  chains.forEach(ch => { for (let k = 0; k + 1 < ch.length; k++) segs.push([ch[k], ch[k + 1]]); });
+  const crossings = rk => {
+    const pos = new Map();
+    rk.forEach(r => r.forEach((it, i) => pos.set(it, i)));
+    const by = Array.from({ length: R }, () => []);
+    segs.forEach(([a, b]) => by[items[a].rank].push([pos.get(a), pos.get(b)]));
+    let c = 0;
+    for (const list of by) for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++)
+      if ((list[i][0] - list[j][0]) * (list[i][1] - list[j][1]) < 0) c++;
+    return c;
+  };
+  const arrange = (k, weight) => {
+    const sums = new Map();
+    ranks[k].forEach(it => { const g = items[it].group; if (g) { const o = sums.get(g) || { s: 0, n: 0 }; o.s += weight.get(it); o.n++; sums.set(g, o); } });
+    const key = it => { const g = items[it].group; return g ? sums.get(g).s / sums.get(g).n : weight.get(it); };
+    const unit = it => items[it].group || '~' + it;
+    const now = new Map(ranks[k].map((it, i) => [it, i]));
+    ranks[k] = ranks[k].slice().sort((a, b) => key(a) - key(b) || (unit(a) < unit(b) ? -1 : unit(a) > unit(b) ? 1 : 0)
+      || weight.get(a) - weight.get(b) || now.get(a) - now.get(b));
+  };
+  const sweep = down => {
+    for (let s = 1; s < R; s++) {
+      const k = down ? s : R - 1 - s;
+      const pos = new Map(ranks[down ? k - 1 : k + 1].map((it, i) => [it, i]));
+      const weight = new Map();
+      ranks[k].forEach((it, i) => {
+        const nb = down ? items[it].up : items[it].down;
+        weight.set(it, nb.length ? nb.reduce((a, x) => a + pos.get(x), 0) / nb.length : i);
+      });
+      arrange(k, weight);
+    }
+  };
+  for (let k = 0; k < R; k++) arrange(k, new Map(ranks[k].map((it, i) => [it, i])));
+  let best = ranks.map(r => r.slice()), bestCount = crossings(ranks);
+  for (let pass = 0; pass < 8; pass++) {
+    sweep(pass % 2 === 0);
+    const c = crossings(ranks);
+    if (c < bestCount || pass === 0 && c === bestCount) { bestCount = c; best = ranks.map(r => r.slice()); }
+  }
+  ranks = best;
+
+  // Cross-axis positions: pull every item toward its neighbours, never closer than the minimum spacing.
+  const gapBetween = (a, b) => {
+    const dummies = (a.dummy ? 1 : 0) + (b.dummy ? 1 : 0);
+    if (a.group === b.group) return dummies === 2 ? 16 : dummies === 1 ? 22 : 28;
+    return (dummies ? 10 : 24) + (a.group ? GROUP_PAD : 0) + (b.group ? GROUP_PAD + (H ? GROUP_TITLE : 0) : 0);
+  };
+  const sep = (a, b) => a.cs / 2 + b.cs / 2 + gapBetween(a, b);
+  for (const r of ranks) {
+    let c = 0;
+    r.forEach((it, i) => { if (i) c += sep(items[r[i - 1]], items[it]); items[it].c = c; });
+    r.forEach(it => { items[it].c -= c / 2; });
+  }
+  // Minimise the weighted sum of |offset| over every edge segment (the objective dot uses), by iteratively
+  // reweighted least squares, one rank at a time. Absolute distance, unlike squared distance, settles on
+  // exact alignment: a chain comes out dead straight and a branch hangs off it.
+  const pull = (a, b) => a.dummy && b.dummy ? 4 : a.dummy || b.dummy ? .5 : 1;
+  for (let pass = 0; pass < 90; pass++) {
+    const eps = Math.max(.2, 24 * Math.pow(.86, pass));
+    for (let s = 0; s < R; s++) {
+      const r = ranks[pass % 2 ? R - 1 - s : s];
+      const off = [0];
+      for (let i = 1; i < r.length; i++) off[i] = off[i - 1] + sep(items[r[i - 1]], items[r[i]]);
+      const blocks = [];
+      r.forEach((ix, i) => {
+        const it = items[ix];
+        let weight = 1e-6, sum = weight * it.c;
+        for (const x of it.up.concat(it.down)) {
+          const w = pull(it, items[x]) / Math.max(eps, Math.abs(it.c - items[x].c));
+          sum += w * items[x].c; weight += w;
+        }
+        blocks.push({ s: (sum / weight - off[i]) * weight, w: weight, n: 1 });
+        while (blocks.length > 1) {
+          const b = blocks[blocks.length - 1], a = blocks[blocks.length - 2];
+          if (a.s / a.w <= b.s / b.w) break;
+          a.s += b.s; a.w += b.w; a.n += b.n; blocks.pop();
+        }
+      });
+      let i = 0;
+      for (const b of blocks) for (let j = 0; j < b.n; j++, i++) items[r[i]].c = b.s / b.w + off[i];
+    }
+  }
+  // Snap to whole points, giving items that ended up within a fraction of each other the same value.
+  let anchor = -Infinity, snapped = 0;
+  for (const it of items.slice().sort((a, b) => a.c - b.c)) {
+    if (it.c - anchor > .4) { anchor = it.c; snapped = Math.round(it.c); }
+    it.c = snapped;
+  }
+
+  // Rank-axis positions. A gap widens to fit the longest label that sits in it.
+  const size = ranks.map(r => Math.max(0, ...r.map(it => items[it].rs)));
+  const gap = new Array(Math.max(0, R - 1)).fill(H ? 76 : 60);
+  m.edges.forEach((e, ei) => {
+    e.labelSeg = Math.floor((chains[ei].length - 2) / 2);
+    e.labelWidth = Math.max(0, ...e.labels.map(t => measure(t, font(T.weight, T.edge))));
+    const k = items[chains[ei][e.labelSeg]].rank;
+    if (H && e.labelWidth) gap[k] = Math.max(gap[k], Math.ceil(e.labelWidth) + 44);
+  });
+  const rpos = [0];
+  for (let k = 1; k < R; k++) rpos[k] = rpos[k - 1] + size[k - 1] / 2 + gap[k - 1] + size[k] / 2;
+  items.forEach(it => { it.r = rpos[it.rank]; });
+  m.nodes.forEach((n, i) => { n.x = H ? items[i].r : items[i].c; n.y = H ? items[i].c : items[i].r; });
+
+  // Ports: edges sharing a side fan out along it, ordered by where they are going.
+  const port = new Map();
+  for (let i = 0; i < N; i++) for (const side of ['out', 'in']) {
+    const list = [];
+    chains.forEach((ch, ei) => {
+      if (side === 'out' && ch[0] === i) list.push({ ei, other: items[ch[1]].c });
+      if (side === 'in' && ch[ch.length - 1] === i) list.push({ ei, other: items[ch[ch.length - 2]].c });
+    });
+    list.sort((p, q) => p.other - q.other || p.ei - q.ei);
+    const curved = ['circle', 'diamond'].includes(m.nodes[i].shape);
+    const stride = list.length > 1 ? Math.min(curved ? 9 : 12, items[i].cs * (curved ? .34 : .56) / (list.length - 1)) : 0;
+    list.forEach((p, j) => port.set(p.ei + side, (j - (list.length - 1) / 2) * stride));
+  }
+  /// How far the outline is from the centre along the rank axis, `d` off-centre on the cross axis.
+  const reach = (n, d) => {
+    const hw = n.w / 2, hh = n.h / 2, a = Math.abs(d);
+    switch (n.shape) {
+      case 'circle': return Math.sqrt(Math.max(0, hw * hw - d * d));
+      case 'diamond': return H ? hw * (1 - a / hh) : hh * (1 - a / hw);
+      case 'pill': {
+        if (H) return hw - hh + Math.sqrt(Math.max(0, hh * hh - d * d));
+        return a <= hw - hh ? hh : Math.sqrt(Math.max(0, hh * hh - (a - hw + hh) ** 2));
+      }
+      case 'database': return H ? hw : hh - DB_RY + DB_RY * Math.sqrt(Math.max(0, 1 - (d / hw) ** 2));
+      default: return H ? hw : hh;
+    }
+  };
+  const point = (r, c) => H ? { x: f(r), y: f(c) } : { x: f(c), y: f(r) };
+  const box = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+  const grow = (x0, y0, x1, y1) => { box.x0 = Math.min(box.x0, x0); box.y0 = Math.min(box.y0, y0); box.x1 = Math.max(box.x1, x1); box.y1 = Math.max(box.y1, y1); };
+
+  m.edges.forEach((e, ei) => {
+    const ch = chains[ei], out = port.get(ei + 'out'), into = port.get(ei + 'in');
+    e.pts = ch.map((ix, k) => {
+      const it = items[ix];
+      if (k === 0) return point(it.r + reach(it.node, out), it.c + out);
+      if (k === ch.length - 1) return point(it.r - reach(it.node, into), it.c + into);
+      return point(it.r, it.c);
+    });
+    const a = e.pts[e.labelSeg], b = e.pts[e.labelSeg + 1], mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    const straight = H ? Math.abs(a.y - b.y) < 3 : Math.abs(a.x - b.x) < 3;
+    // Beside a straight edge, on top of a bent one (where the halo knocks the line out).
+    const lift = T.edge * .8;
+    e.lab = !straight ? { x: mx, y: my, anchor: 'middle' } : H ? { x: mx, y: my - lift, anchor: 'middle' } : { x: mx + lift, y: my, anchor: 'start' };
+    const from = m.nodes[e.u], to = m.nodes[e.v];
+    e.knock = !T.sketch && from.group && from.group === to.group ? 'var(--group-fill)' : 'var(--bg)';
+    e.pts.forEach(p => grow(p.x, p.y, p.x, p.y));
+    if (e.labelWidth) {
+      const lx = e.lab.anchor === 'middle' ? e.lab.x - e.labelWidth / 2 : e.lab.x;
+      grow(lx, e.lab.y - 9, lx + e.labelWidth, e.lab.y + 9);
+    }
+  });
+  for (const n of m.nodes) grow(n.x - n.w / 2, n.y - n.h / 2, n.x + n.w / 2, n.y + n.h / 2);
+  for (const g of m.groups) {
+    const ns = g.members.map(id => m.byId.get(id));
+    if (!ns.length) { g.box = null; continue; }
+    const x0 = Math.min(...ns.map(n => n.x - n.w / 2)) - GROUP_PAD, x1 = Math.max(...ns.map(n => n.x + n.w / 2)) + GROUP_PAD;
+    const y0 = Math.min(...ns.map(n => n.y - n.h / 2)) - GROUP_PAD - GROUP_TITLE, y1 = Math.max(...ns.map(n => n.y + n.h / 2)) + GROUP_PAD;
+    g.box = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    grow(x0, y0, x1, y1);
+  }
+  return { H, x: Math.floor(box.x0 - MARGIN), y: Math.floor(box.y0 - MARGIN),
+           w: Math.ceil(box.x1 - box.x0 + 2 * MARGIN), h: Math.ceil(box.y1 - box.y0 + 2 * MARGIN), crossings: bestCount };
+}
+
+// ---------------------------------------------------------------- geometry
+
+/// One hop between waypoints, with a rounded right-angle bend in the middle.
+function elbow(a, b, H) {
+  if (H) {
+    const mx = (a.x + b.x) / 2, dy = b.y - a.y, r = Math.min(8, Math.abs(dy) / 2, Math.abs(b.x - a.x) / 2), s = Math.sign(dy);
+    if (r < .5) return `L${f(b.x)},${f(b.y)}`;
+    return `H${f(mx - r)}Q${f(mx)},${f(a.y)} ${f(mx)},${f(a.y + s * r)}V${f(b.y - s * r)}Q${f(mx)},${f(b.y)} ${f(mx + r)},${f(b.y)}H${f(b.x)}`;
+  }
+  const my = (a.y + b.y) / 2, dx = b.x - a.x, r = Math.min(8, Math.abs(dx) / 2, Math.abs(b.y - a.y) / 2), s = Math.sign(dx);
+  if (r < .5) return `L${f(b.x)},${f(b.y)}`;
+  return `V${f(my - r)}Q${f(a.x)},${f(my)} ${f(a.x + s * r)},${f(my)}H${f(b.x - s * r)}Q${f(b.x)},${f(my)} ${f(b.x)},${f(my + r)}V${f(b.y)}`;
+}
+/// The edge line. `pts` runs from the low-rank end to the high-rank end; an end that carries a head is cut short for it.
+function linePath(e, H, headLo, headHi, curve) {
+  const p = e.pts.map(q => ({ x: q.x, y: q.y })), axis = H ? 'x' : 'y', cut = TIP + HEAD - 1.5;
+  if (headHi) p[p.length - 1][axis] -= cut;
+  if (headLo) p[0][axis] += cut;
+  let d = `M${f(p[0].x)},${f(p[0].y)}`;
+  for (let i = 1; i < p.length; i++) {
+    const a = p[i - 1], b = p[i];
+    if (curve === 'straight') d += `L${f(b.x)},${f(b.y)}`;
+    else if (curve === 'elbow') d += elbow(a, b, H);
+    else if (H) { const mx = f((a.x + b.x) / 2); d += `C${mx},${f(a.y)} ${mx},${f(b.y)} ${f(b.x)},${f(b.y)}`; }
+    else { const my = f((a.y + b.y) / 2); d += `C${f(a.x)},${my} ${f(b.x)},${my} ${f(b.x)},${f(b.y)}`; }
+  }
+  return d;
+}
+function headPath(e, H, end) {
+  const q = end === 'hi' ? e.pts[e.pts.length - 1] : e.pts[0], s = end === 'hi' ? 1 : -1;
+  if (H) { const tip = q.x - s * TIP, base = tip - s * HEAD; return `M${f(tip)},${q.y}L${f(base)},${f(q.y - HEAD_HALF)}L${f(base)},${f(q.y + HEAD_HALF)}Z`; }
+  const tip = q.y - s * TIP, base = tip - s * HEAD;
+  return `M${q.x},${f(tip)}L${f(q.x - HEAD_HALF)},${f(base)}L${f(q.x + HEAD_HALF)},${f(base)}Z`;
+}
+function roundRect(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  if (r < .5) return `M${x},${y}H${x + w}V${y + h}H${x}Z`;
+  return `M${x + r},${y}H${x + w - r}A${r},${r} 0 0 1 ${x + w},${y + r}V${y + h - r}A${r},${r} 0 0 1 ${x + w - r},${y + h}H${x + r}A${r},${r} 0 0 1 ${x},${y + h - r}V${y + r}A${r},${r} 0 0 1 ${x + r},${y}Z`;
+}
+function roundPoly(pts, r) {
+  let d = '';
+  pts.forEach((p, i) => {
+    const toward = q => { const dx = q[0] - p[0], dy = q[1] - p[1], len = Math.hypot(dx, dy); return [f(p[0] + dx / len * r), f(p[1] + dy / len * r)]; };
+    const a = toward(pts[(i + pts.length - 1) % pts.length]), b = toward(pts[(i + 1) % pts.length]);
+    d += `${i ? 'L' : 'M'}${a[0]},${a[1]}Q${p[0]},${p[1]} ${b[0]},${b[1]}`;
+  });
+  return d + 'Z';
+}
+function shapePath(n, corner) {
+  const w = n.w, h = n.h, x = -w / 2, y = -h / 2;
+  switch (n.shape) {
+    case 'circle': return `M${x},0A${w / 2},${w / 2} 0 1 1 ${w / 2},0A${w / 2},${w / 2} 0 1 1 ${x},0Z`;
+    case 'diamond': return roundPoly([[0, y], [w / 2, 0], [0, h / 2], [x, 0]], Math.max(.5, Math.min(corner, 8) * .75));
+    case 'pill': return roundRect(x, y, w, h, h / 2);
+    case 'database': return `M${x},${y + DB_RY}A${w / 2},${DB_RY} 0 0 1 ${x + w},${y + DB_RY}V${y + h - DB_RY}A${w / 2},${DB_RY} 0 0 1 ${x},${y + h - DB_RY}Z`
+                          + `M${x},${y + DB_RY}A${w / 2},${DB_RY} 0 0 0 ${x + w},${y + DB_RY}`;
+    default: return roundRect(x, y, w, h, corner);
+  }
+}
+
+// ---------------------------------------------------------------- sketch
+// Every wobble comes from a generator seeded by the element's id, so a diagram is drawn the same way every time.
+
+function hashOf(str) { let h = 2166136261; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+function seeded(seed) {
+  let a = seed >>> 0;
+  return () => { a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+/// One pen stroke: each point drifts a little, then a smooth curve is threaded through them all.
+function pen(pts, rand, amp, pinEnds) {
+  const p = pts.map(([x, y], i) => pinEnds && (i === 0 || i === pts.length - 1) ? [x, y] : [x + (rand() - .5) * 2 * amp, y + (rand() - .5) * 2 * amp]);
+  let d = `M${f(p[0][0])},${f(p[0][1])}`;
+  for (let i = 0; i + 1 < p.length; i++) {
+    const p0 = p[Math.max(0, i - 1)], p1 = p[i], p2 = p[i + 1], p3 = p[Math.min(p.length - 1, i + 2)];
+    d += `C${f(p1[0] + (p2[0] - p0[0]) / 6)},${f(p1[1] + (p2[1] - p0[1]) / 6)} ${f(p2[0] - (p3[0] - p1[0]) / 6)},${f(p2[1] - (p3[1] - p1[1]) / 6)} ${f(p2[0])},${f(p2[1])}`;
+  }
+  return d;
+}
+/// A ruled-by-hand line: slightly bowed, running a touch past both ends.
+function penLine(a, b, rand) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy) || 1, ux = dx / len, uy = dy / len, over = .5 + rand() * 2.2;
+  const at = t => [a[0] + dx * t, a[1] + dy * t];
+  return pen([[a[0] - ux * over, a[1] - uy * over], at(.3 + rand() * .12), at(.62 + rand() * .12), [b[0] + ux * over, b[1] + uy * over]], rand, .9);
+}
+/// A closed outline drawn in one go, starting anywhere and overlapping itself slightly where it meets.
+function penLoop(pts, rand) {
+  const start = Math.floor(rand() * pts.length), seq = [];
+  for (let i = 0; i <= pts.length + 1; i++) seq.push(pts[(start + i) % pts.length]);
+  return pen(seq, rand, .8);
+}
+const arcPoints = (cx, cy, rx, ry, a0, a1, count) => Array.from({ length: count }, (_, i) => {
+  const a = a0 + (a1 - a0) * i / (count - 1);
+  return [cx + rx * Math.cos(a), cy + ry * Math.sin(a)];
+});
+const ringPoints = (cx, cy, rx, ry, count) => Array.from({ length: count }, (_, i) => {
+  const a = 2 * Math.PI * i / count;
+  return [cx + rx * Math.cos(a), cy + ry * Math.sin(a)];
+});
+function sketchShape(n) {
+  const rand = seeded(hashOf(n.id)), w = n.w, h = n.h, x = -w / 2, y = -h / 2, PI = Math.PI;
+  const sides = pts => pts.map((p, i) => penLine(p, pts[(i + 1) % pts.length], rand)).join('');
+  let d = '';
+  for (let pass = 0; pass < 2; pass++) {
+    if (n.shape === 'circle') d += penLoop(ringPoints(0, 0, w / 2, w / 2, 12), rand);
+    else if (n.shape === 'diamond') d += sides([[0, y], [w / 2, 0], [0, h / 2], [x, 0]]);
+    else if (n.shape === 'pill') {
+      const r = h / 2;
+      d += penLoop([[x + r, y], [0, y], [x + w - r, y], ...arcPoints(x + w - r, 0, r, r, -PI / 2 + .4, PI / 2 - .4, 5),
+                    [x + w - r, y + h], [0, y + h], [x + r, y + h], ...arcPoints(x + r, 0, r, r, PI / 2 + .4, 3 * PI / 2 - .4, 5)], rand);
+    }
+    else if (n.shape === 'database') {
+      d += penLoop(ringPoints(0, y + DB_RY, w / 2, DB_RY, 12), rand);
+      d += penLine([x, y + DB_RY], [x, y + h - DB_RY], rand) + penLine([x + w, y + DB_RY], [x + w, y + h - DB_RY], rand);
+      d += pen(arcPoints(0, y + h - DB_RY, w / 2, DB_RY, 0, PI, 7), rand, .8);
+    }
+    else d += sides([[x, y], [x + w, y], [x + w, y + h], [x, y + h]]);
+  }
+  return d;
+}
+/// Diagonal pencil shading across a node; a clip path trims it to the outline.
+function hatchPath(n) {
+  const rand = seeded(hashOf(n.id + '/hatch')), x = -n.w / 2, y = -n.h / 2;
+  let d = '';
+  for (let k = -n.h; k < n.w; k += 6.5) {
+    const j = () => (rand() - .5) * 2;
+    d += `M${f(x + k + j())},${f(y + n.h + 1)}L${f(x + k + n.h + j())},${f(y - 1)}`;
+  }
+  return d;
+}
+function sketchLine(e, H) {
+  const rand = seeded(hashOf(e.from + '>' + e.to)), axis = H ? 'x' : 'y';
+  const p = e.pts.map(q => ({ x: q.x, y: q.y }));
+  p[0][axis] += 2.5; p[p.length - 1][axis] -= 2.5;
+  const pts = [];
+  for (let i = 1; i < p.length; i++) {
+    const a = p[i - 1], b = p[i];
+    const c1 = H ? { x: (a.x + b.x) / 2, y: a.y } : { x: a.x, y: (a.y + b.y) / 2 }, c2 = H ? { x: (a.x + b.x) / 2, y: b.y } : { x: b.x, y: (a.y + b.y) / 2 };
+    const count = Math.max(3, Math.round(Math.hypot(b.x - a.x, b.y - a.y) / 24));
+    for (let k = i > 1 ? 1 : 0; k <= count; k++) {
+      const t = k / count, u = 1 - t;
+      pts.push([u * u * u * a.x + 3 * u * u * t * c1.x + 3 * u * t * t * c2.x + t * t * t * b.x,
+                u * u * u * a.y + 3 * u * u * t * c1.y + 3 * u * t * t * c2.y + t * t * t * b.y]);
+    }
+  }
+  return pen(pts, rand, .9, true);
+}
+/// An open arrowhead: two short strokes meeting at the tip.
+function sketchHead(e, H, end) {
+  const rand = seeded(hashOf(e.from + '>' + e.to + end)), j = () => (rand() - .5) * 1.8;
+  const q = end === 'hi' ? e.pts[e.pts.length - 1] : e.pts[0], s = end === 'hi' ? 1 : -1;
+  if (H) { const tip = q.x - s * 2.5; return `M${f(tip - s * 9 + j())},${f(q.y - 4.8 + j())}L${f(tip)},${f(q.y)}L${f(tip - s * 9 + j())},${f(q.y + 4.8 + j())}`; }
+  const tip = q.y - s * 2.5;
+  return `M${f(q.x - 4.8 + j())},${f(tip - s * 9 + j())}L${f(q.x)},${f(tip)}L${f(q.x + 4.8 + j())},${f(tip - s * 9 + j())}`;
+}
+
+// ---------------------------------------------------------------- player
+
+const NS = 'http://www.w3.org/2000/svg';
+const S = (name, attrs = {}, text) => {
+  const el = document.createElementNS(NS, name);
+  for (const k in attrs) el.setAttribute(k, attrs[k]);
+  if (text != null) el.textContent = text;
+  return el;
+};
+const E = (name, cls, html) => { const el = document.createElement(name); if (cls) el.className = cls; if (html != null) el.innerHTML = html; return el; };
+const fig = document.getElementById('fig');
+// The shipping player follows the system's reduce-motion setting. Here motion is the thing under review, so it is a switch.
+let motion = true;
+let view = null;     // everything about the diagram currently on screen
+let runToken = 0;    // bumped on every step change so stale animations stop
+let clipCount = 0;
+
+function swapText(el, text, animate) {
+  clearTimeout(el._swap);
+  if (el.textContent === text) { el.style.opacity = ''; return; }
+  if (!animate) { el.textContent = text; el.style.opacity = ''; return; }
+  el.style.opacity = 0;
+  el._swap = setTimeout(() => { el.textContent = text; el.style.opacity = ''; }, 140);
+}
+
+function render(m, keepIndex) {
+  const T = theme(m), lay = layout(m, T), states = buildStates(m), H = lay.H;
+  stop();
+  fig.textContent = '';
+  if (T.accent) fig.style.setProperty('--accent', T.accent); else fig.style.removeProperty('--accent');
+  const svg = S('svg', { class: 'stage', viewBox: `${lay.x} ${lay.y} ${lay.w} ${lay.h}`, width: lay.w, height: lay.h, role: 'img' });
+  svg.style.cssText = `font-family:${T.family};--sw:${T.stroke}px;--tag:${T.tag}px;--edge:${T.edge}px;--fw:${T.weight}`;
+  const layers = ['groups', 'edges', 'labels', 'nodes', 'tokens'].map(name => svg.appendChild(S('g', { class: name })));
+
+  const groups = m.groups.map(g => {
+    const el = S('g', { class: 'group' });
+    if (g.box) {
+      const b = g.box;
+      if (T.sketch) {
+        const rand = seeded(hashOf(g.id)), c = [[b.x, b.y], [b.x + b.w, b.y], [b.x + b.w, b.y + b.h], [b.x, b.y + b.h]];
+        el.append(S('path', { class: 'gsk', d: c.map((p, i) => penLine(p, c[(i + 1) % 4], rand)).join('') }));
+      } else el.append(S('rect', { x: b.x, y: b.y, width: b.w, height: b.h, rx: Math.min(12, T.corner * 1.5) }));
+      el.append(S('text', { x: b.x + 14, y: b.y + 20 }, g.title));
+    }
+    return layers[0].appendChild(el);
+  });
+  const edges = m.edges.map(e => {
+    const el = S('g', { class: 'edge ' + e.style });
+    const line = S('path', { class: 'line' });
+    if (e.style === 'solid') line.setAttribute('pathLength', 1);
+    if (T.sketch) line.setAttribute('d', sketchLine(e, H));
+    const head = end => S('path', { class: 'head ' + end, d: T.sketch ? sketchHead(e, H, end) : headPath(e, H, end) });
+    el.append(line, head('hi'), head('lo'));
+    const label = S('text', { class: 'elabel', x: e.lab.x, y: e.lab.y, dy: '.35em', 'text-anchor': e.lab.anchor });
+    label.style.setProperty('--knock', e.knock);
+    for (const target of [el, label]) {
+      if (e.color) target.style.setProperty('--ec', e.color);
+      if (e.width) target.style.setProperty('--ew', e.width + 'px');
+    }
+    layers[1].appendChild(el);
+    layers[2].appendChild(label);
+    return { el, line, label };
+  });
+  const nodes = new Map(m.nodes.map(n => {
+    const el = S('g', { class: 'node' + (n.border !== 'solid' ? ' b-' + n.border : ''), transform: `translate(${n.x},${n.y})` });
+    const inner = el.appendChild(S('g', { class: 'inner' }));
+    if (n.fill) el.style.setProperty('--nfill', n.fill);
+    if (n.stroke) el.style.setProperty('--nstroke', n.stroke);
+    if (n.text) el.style.setProperty('--ntext', n.text);
+    const d = shapePath(n, T.corner), sink = n.shape === 'database' ? DB_RY / 2 : 0;
+    inner.append(S('path', { class: 'shape', d }));
+    if (T.sketch) {
+      const id = 'clip-' + (++clipCount), clip = S('clipPath', { id });
+      clip.append(S('path', { d }));
+      inner.append(clip, S('path', { class: 'hatch', d: hatchPath(n), 'clip-path': `url(#${id})` }), S('path', { class: 'sk', d: sketchShape(n) }));
+    }
+    const label = S('text', { class: 'label', 'text-anchor': 'middle', dy: '.35em', y: sink });
+    label.style.fontSize = n.fontSize + 'px';
+    const tag = S('text', { class: 'tag', 'text-anchor': 'middle', dy: '.35em', y: f(sink + 11 * n.unit) });
+    const ring = S('path', { class: 'ring', d });
+    inner.append(ring, label, tag);
+    layers[3].appendChild(el);
+    return [n.id, { el, label, tag, ring }];
+  }));
+
+  fig.appendChild(svg);
+  let cap = null, dots = [], prev = null, next = null, play = null;
+  if (m.steps.length) {
+    cap = fig.appendChild(E('figcaption', 'cap', '<div class="cap-title"></div><div class="cap-text"></div>'));
+    const controls = fig.appendChild(E('div', 'controls'));
+    prev = controls.appendChild(E('button', 'nav', '<svg viewBox="0 0 16 16"><path d="M10 3.5 5.5 8l4.5 4.5"/></svg>'));
+    const row = controls.appendChild(E('div', 'dots'));
+    dots = m.steps.map((_, i) => { const d = row.appendChild(E('button', 'dot')); d.setAttribute('aria-label', 'Step ' + (i + 1)); d.onclick = () => { stop(); go(i); }; return d; });
+    next = controls.appendChild(E('button', 'nav', '<svg viewBox="0 0 16 16"><path d="M6 3.5 10.5 8 6 12.5"/></svg>'));
+    play = controls.appendChild(E('button', 'nav play'));
+    prev.setAttribute('aria-label', 'Previous step'); next.setAttribute('aria-label', 'Next step');
+    prev.onclick = () => { stop(); go(view.index - 1); };
+    next.onclick = () => { stop(); go(view.index + 1); };
+    play.onclick = () => view.timer ? stop() : start();
+  }
+  view = { m, T, lay, states, H, svg, tokens: layers[4], groups, edges, nodes, cap, dots, prev, next, play, index: 0, timer: null };
+  setPlayIcon(false);
+  svg.classList.add('no-anim');
+  go(Math.min(keepIndex || 0, states.length - 1), false);
+  svg.getBoundingClientRect();
+  svg.classList.remove('no-anim');
+}
+
+function go(i, animate = true) {
+  const v = view;
+  i = Math.max(0, Math.min(v.states.length - 1, i));
+  animate = animate && motion;
+  v.index = i;
+  const token = ++runToken, s = v.states[i];
+  v.tokens.textContent = '';
+
+  v.m.groups.forEach((g, k) => { v.groups[k].classList.toggle('off', !s.groups[k].visible); v.groups[k].classList.toggle('dim', s.groups[k].dim); });
+  for (const n of v.m.nodes) {
+    const st = s.nodes.get(n.id), el = v.nodes.get(n.id);
+    el.el.classList.toggle('off', !st.visible);
+    el.el.classList.toggle('dim', st.dim);
+    if (st.tone) el.el.dataset.tone = st.tone; else delete el.el.dataset.tone;
+    if (st.toneColor) el.el.style.setProperty('--tone', st.toneColor); else el.el.style.removeProperty('--tone');
+    swapText(el.label, n.show(st.label), animate);
+    swapText(el.tag, st.tag, animate);
+    el.label.style.transform = st.tag ? `translateY(${f(-10 * n.unit)}px)` : '';
+  }
+  v.m.edges.forEach((e, k) => {
+    const st = s.edges[k], el = v.edges[k];
+    // A send always shows one head, at the receiver. Otherwise the edge's own arrow setting decides.
+    let hi, lo;
+    if (st.live || e.arrow === 'end') { hi = st.headAtTo !== e.flip; lo = !hi; }
+    else hi = lo = e.arrow === 'both';
+    if (!v.T.sketch) el.line.setAttribute('d', linePath(e, v.H, lo, hi, v.T.curve));
+    el.el.classList.toggle('off', !st.visible);
+    el.el.classList.toggle('dim', st.dim);
+    el.el.classList.toggle('live', st.live);
+    el.el.classList.toggle('at-hi', hi);
+    el.el.classList.toggle('at-lo', lo);
+    el.label.classList.toggle('off', !st.visible);
+    el.label.classList.toggle('dim', st.dim);
+    el.label.classList.toggle('live', st.live);
+    swapText(el.label, st.label, animate);
+  });
+  if (v.cap) {
+    const step = v.m.steps[i];
+    swapText(v.cap.children[0], step.title, animate);
+    swapText(v.cap.children[1], step.caption, animate);
+    v.dots.forEach((d, k) => d.classList.toggle('on', k === i));
+    v.prev.disabled = i === 0; v.next.disabled = i === v.states.length - 1;
+  }
+  if (animate) s.sends.forEach((send, k) => travel(send, k, token));
+}
+
+/// A dot runs the edge from sender to receiver, then the receiver's outline pulses once.
+function travel(send, order, token) {
+  const v = view, e = v.m.edges[send.i], path = v.edges[send.i].line, length = path.getTotalLength();
+  const lowToHigh = send.against === e.flip;
+  const dot = v.tokens.appendChild(S('circle', { class: 'token', r: 3.5, opacity: 0 }));
+  const startAt = performance.now() + 140 + order * 480, duration = Math.min(900, Math.max(460, length * 2.8));
+  const tick = now => {
+    if (token !== runToken) { dot.remove(); return; }
+    const t = (now - startAt) / duration;
+    if (t >= 1) {
+      dot.remove();
+      v.nodes.get(send.to).ring.animate([{ opacity: .5, strokeWidth: '1.5px' }, { opacity: 0, strokeWidth: '10px' }], { duration: 520, easing: 'ease-out' });
+      return;
+    }
+    if (t > 0) {
+      const u = t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      const p = path.getPointAtLength((lowToHigh ? u : 1 - u) * length);
+      dot.setAttribute('cx', p.x); dot.setAttribute('cy', p.y);
+      dot.setAttribute('opacity', Math.min(1, t * 8, (1 - t) * 8));
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+function setPlayIcon(playing) {
+  if (!view || !view.play) return;
+  view.play.innerHTML = playing ? '<svg viewBox="0 0 16 16"><path d="M4.5 3.5h2.4v9H4.5zM9.1 3.5h2.4v9H9.1z"/></svg>'
+                                : '<svg viewBox="0 0 16 16"><path d="M5 3.2v9.6L12.6 8z"/></svg>';
+  view.play.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+}
+function stop() { if (view && view.timer) { clearTimeout(view.timer); view.timer = null; setPlayIcon(false); } }
+function start() {
+  if (view.index === view.states.length - 1) go(0);
+  setPlayIcon(true);
+  const wait = () => 2300 + view.states[view.index].sends.length * 480;
+  const advance = () => {
+    if (view.index >= view.states.length - 1) { view.timer = null; setPlayIcon(false); return; }
+    go(view.index + 1);
+    view.timer = setTimeout(advance, wait());
+  };
+  view.timer = setTimeout(advance, wait());
+}
+fig.addEventListener('keydown', e => {
+  if (!view || !view.cap) return;
+  if (e.key === 'ArrowRight') { stop(); go(view.index + 1); e.preventDefault(); }
+  if (e.key === 'ArrowLeft') { stop(); go(view.index - 1); e.preventDefault(); }
+  if (e.key === ' ') { view.timer ? stop() : start(); e.preventDefault(); }
+});
+
+// ---------------------------------------------------------------- prototype shell
+
+const src = document.getElementById('src'), gutter = document.getElementById('gutter');
+const errorsEl = document.getElementById('errors'), stats = document.getElementById('stats');
+const looksEl = document.getElementById('looks'), examplesEl = document.getElementById('examples');
+let example = 0, pending = null;
+
+function update(keepIndex) {
+  const { model, errors } = parse(src.value, look === 'custom');
+  const bad = new Set(errors.map(e => e.line));
+  gutter.innerHTML = src.value.split('\n').map((_, i) => `<span${bad.has(i + 1) ? ' class="bad"' : ''}>${i + 1}</span>`).join('');
+  gutter.scrollTop = src.scrollTop;
+  errorsEl.innerHTML = errors.map(e => `<div>line ${e.line}: ${e.msg.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</div>`).join('');
+  window.flow = { model, errors, go: i => go(i), view: () => view, setLook };
+  if (errors.length) return;   // keep the last good picture while the source is broken
+  render(model, keepIndex ? view && view.index : 0);
+  stats.textContent = `${model.nodes.length} nodes · ${model.edges.length} edges · ${model.steps.length} steps · ${view.lay.w}×${view.lay.h}`;
+}
+function load(i) {
+  example = i;
+  const ex = EXAMPLES[i];
+  src.value = ex.source;
+  document.getElementById('ptitle').textContent = ex.title;
+  document.getElementById('pintro').textContent = ex.intro;
+  document.getElementById('poutro').textContent = ex.outro;
+  examplesEl.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', +b.dataset.i === i));
+  update(false);
+}
+/// Switching variant keeps the diagram on screen where it can, so the same source can be compared across looks.
+function setLook(name) {
+  const entering = name === 'custom' && look !== 'custom';
+  look = name;
+  for (const key in LOOKS) fig.classList.toggle('look-' + key, key === name);
+  looksEl.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', b.dataset.look === name));
+  examplesEl.textContent = '';
+  EXAMPLES.forEach((ex, i) => {
+    if (ex.custom && name !== 'custom') return;
+    const b = examplesEl.appendChild(E('button', '', ex.name));
+    b.dataset.i = i;
+    b.onclick = () => load(i);
+  });
+  document.getElementById('grammar').textContent = GRAMMAR + (name === 'custom' ? GRAMMAR_CUSTOM : '');
+  const custom = EXAMPLES.findIndex(ex => ex.custom);
+  if (entering) load(custom);
+  else if (EXAMPLES[example].custom && name !== 'custom') load(0);
+  else { examplesEl.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', +b.dataset.i === example)); update(true); }
+}
+for (const key in LOOKS) {
+  const b = looksEl.appendChild(E('button', '', LOOKS[key]));
+  b.dataset.look = key;
+  b.onclick = () => setLook(key);
+}
+src.addEventListener('input', () => { clearTimeout(pending); pending = setTimeout(() => update(true), 180); });
+src.addEventListener('scroll', () => { gutter.scrollTop = src.scrollTop; });
+
+const motionButton = document.getElementById('motion');
+motionButton.onclick = () => {
+  motion = !motion;
+  motionButton.textContent = motion ? 'Motion on' : 'Motion off';
+  fig.classList.toggle('still', !motion);
+  if (!motion) stop();
+};
+const themeButton = document.getElementById('theme');
+function setTheme(dark) {
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  themeButton.textContent = dark ? 'Light' : 'Dark';
+}
+themeButton.onclick = () => setTheme(document.documentElement.dataset.theme !== 'dark');
+setTheme(matchMedia('(prefers-color-scheme: dark)').matches);
+src.value = EXAMPLES[0].source;
+setLook('clean');
+load(0);
+</script>
+</body>
+</html>
