@@ -259,6 +259,18 @@ public final class EditorState {
         return block.id
     }
 
+    /// Clicking the space below the last block: puts the caret in an empty paragraph at the end,
+    /// reusing the last block when it already is one so repeated clicks do not pile up blocks.
+    @discardableResult
+    public func focusEnd() -> String {
+        if let last = blocks.last, last.type == .paragraph, last.runs.isEmpty {
+            focus = Focus(blockID: last.id, offset: 0)
+            onChange?(.rows([blocks.count - 1]))
+            return last.id
+        }
+        return insertBlock(Block(type: .paragraph), after: blocks.last?.id)
+    }
+
     public func delete(_ id: String) {
         guard let i = index(of: id) else { return }
         checkpoint()

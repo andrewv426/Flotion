@@ -26,6 +26,28 @@ private func texts(_ e: EditorState) -> [String] { e.blocks.map(\.plainText) }
         #expect(!e.hasPendingChanges)
     }
 
+    @Test func clickingBelowTheLastBlockAddsOneEmptyParagraph() {
+        let e = editor([Block(.heading1, "Title"), Block(.bullet, "item", depth: 1)])
+        let id = e.focusEnd()
+        #expect(e.blocks.map(\.type) == [.heading1, .bullet, .paragraph])
+        #expect(e.blocks[2].depth == 0, "the new block starts at the left edge, not inside the list")
+        #expect(e.focus == Focus(blockID: id, offset: 0))
+        #expect(e.focusEnd() == id, "a second click reuses the empty block")
+        #expect(e.blocks.count == 3)
+        e.undo()
+        #expect(texts(e) == ["Title", "item"])
+    }
+
+    @Test func clickingBelowAnEmptyLastParagraphJustFocusesIt() {
+        let e = editor([Block(.paragraph, "text"), Block(.paragraph, "")])
+        var changes: [EditorChange] = []
+        e.onChange = { changes.append($0) }
+        #expect(e.focusEnd() == e.blocks[1].id)
+        #expect(e.blocks.count == 2)
+        #expect(!e.canUndo, "only moving the caret is not an undo step")
+        #expect(changes == [.rows([1])])
+    }
+
     @Test func returnSplitsTextAndMovesCaretToTheNewBlock() {
         let e = editor([Block(.paragraph, "HelloWorld")])
         e.split(e.blocks[0].id, at: 5)

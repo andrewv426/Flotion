@@ -37,6 +37,12 @@ enum SelfTest {
         }
         func window() -> NSWindow? { NSApp.windows.first { $0.isVisible && $0.contentView != nil } }
         func responder() -> BlockTextView? { window()?.firstResponder as? BlockTextView }
+        func findView<T: NSView>(_ type: T.Type, in view: NSView?) -> T? {
+            guard let view else { return nil }
+            if let match = view as? T { return match }
+            for sub in view.subviews { if let found = findView(type, in: sub) { return found } }
+            return nil
+        }
         func type(_ text: String) {
             guard let tv = responder() else { failures.append("no focused text view when typing '\(text)'"); return }
             tv.insertText(text, replacementRange: tv.selectedRange())
@@ -129,6 +135,37 @@ enum SelfTest {
             await waitFor { model.editor?.blocks.last?.plainText == "Added from outside the editor." }
             check(model.editor?.blocks.last?.plainText == "Added from outside the editor.", "an external write shows up live in the open page")
             snapshot("03-live-refresh")
+
+            // Below the last block there is room to scroll it up and click to keep typing.
+            if let table = findView(EditorTableView.self, in: window()?.contentView),
+               let controller = table.delegate as? EditorController, let scroll = table.enclosingScrollView {
+                scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, table.frame.height - scroll.contentView.bounds.height)))
+                scroll.reflectScrolledClipView(scroll.contentView)
+                window()?.displayIfNeeded()
+                let lastBlock = table.rect(ofRow: controller.endRow - 1)
+                let gap = scroll.contentView.bounds.maxY - lastBlock.maxY
+                check(gap >= Theme.minimumEndSpace - 1, "scrolled to the end, the last block sits \(Int(gap)) pt above the bottom edge")
+                let count = model.editor?.blocks.count ?? 0
+                if let end = table.view(atColumn: 0, row: controller.endRow, makeIfNecessary: false) as? EndSpaceCell,
+                   let event = NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                  windowNumber: window()?.windowNumber ?? 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                    end.mouseDown(with: event)
+                    end.mouseDown(with: event)
+                    await pause()
+                    check(model.editor?.blocks.count == count + 1 && model.editor?.blocks.last?.type == .paragraph
+                          && model.editor?.blocks.last?.runs.isEmpty == true,
+                          "clicking below the last block adds one empty block, however often it is clicked")
+                    check(responder()?.blockID == model.editor?.blocks.last?.id, "the caret goes to that empty block")
+                    type("Typed at the end")
+                    check(model.editor?.blocks.last?.plainText == "Typed at the end", "typing there fills the new block")
+                    snapshot("03b-end-space")
+                    // Let it save before the next external write appends after it.
+                    await waitFor { model.editor?.hasPendingChanges == false }
+                    await pause(100)
+                } else {
+                    check(false, "the space after the last block is a row of the table")
+                }
+            }
         }
 
         // A diagram created the way the MCP tool creates one renders in the sandboxed web view.
