@@ -6,3 +6,4 @@ xcuserdata/
 *.xcuserstate
 .swiftpm/
 Fixtures/*.sqlite*
+.worktrees/
