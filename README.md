@@ -5,7 +5,7 @@ A minimal, native notes app for macOS in the style of Notion, built so that LLMs
 - **Just the core loop.** Nested pages, a block editor, and one SQLite file to keep them in.
 - **Native and fast.** SwiftUI and AppKit, no web runtime for the editor. A 5,000-block page opens in under 30 ms.
 - **MCP built in.** A bundled server lets Claude Code, Claude Desktop or any MCP client search, read and edit the workspace.
-- **Animated diagrams.** An LLM can create a step-through or free-form animated diagram with one tool call and place it in a page.
+- **Animated diagrams.** An LLM writes a diagram in Flow, a small text language: what exists and what changes at each step. Flotion lays it out, draws the arrows and animates it, so every diagram looks the same and none needs coordinates.
 - **An assistant in the app.** A side panel that knows the open page, and "Edit with AI" on selected text. It runs on your Claude subscription through Claude Code; there is no API key.
 
 ![A page with a step-through diagram](docs/images/page-with-diagram.png)
