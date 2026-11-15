@@ -89,6 +89,10 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
     private var flushScheduled = false
     private var widthChangeScheduled = false
     private static let dragType = NSPasteboard.PasteboardType("app.flotion.block-row")
+    /// Reusable cells by kind (see `dequeue`), and how many have been built; the self-test reads the count.
+    private var spareCells: [NSUserInterfaceItemIdentifier: [NSTableCellView]] = [:]
+    private static let maxSpareCells = 80
+    private(set) var cellsCreated = 0
 
     override init() {
         super.init()
@@ -308,9 +312,22 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
         return cell
     }
 
+    /// Rows the table has let go of hand their cells back here for the next rows shown.
+    func tableView(_ tableView: NSTableView, didRemove rowView: NSTableRowView, forRow row: Int) {
+        guard let cell = rowView.view(atColumn: 0) as? NSTableCellView, let id = cell.identifier,
+              spareCells[id, default: []].count < Self.maxSpareCells else { return }
+        // Detached now, so the row view it came from cannot take it back from a later row.
+        cell.removeFromSuperview()
+        spareCells[id, default: []].append(cell)
+    }
+
+    /// Cells come only from `spareCells` (never `makeView(withIdentifier:)` as well), so one cell
+    /// can never be handed to two rows. `makeView` gets nothing back after `reloadData`, so with it
+    /// every page switch built its visible rows from scratch: about 20 ms whatever the page's size.
     private func dequeue<Cell: NSTableCellView>(_ name: String) -> Cell {
         let id = NSUserInterfaceItemIdentifier(name)
-        if let cell = table.makeView(withIdentifier: id, owner: nil) as? Cell { return cell }
+        if let cell = spareCells[id]?.popLast() as? Cell { return cell }
+        cellsCreated += 1
         let cell = Cell(frame: NSRect(x: 0, y: 0, width: table.bounds.width, height: 30))
         cell.identifier = id
         return cell

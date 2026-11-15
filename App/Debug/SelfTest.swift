@@ -37,6 +37,11 @@ enum SelfTest {
         }
         func window() -> NSWindow? { NSApp.windows.first { $0.isVisible && $0.contentView != nil } }
         func responder() -> BlockTextView? { window()?.firstResponder as? BlockTextView }
+        func findController(in view: NSView? = nil) -> EditorController? {
+            guard let view = view ?? window()?.contentView else { return nil }
+            if let table = view as? EditorTableView { return table.delegate as? EditorController }
+            return view.subviews.lazy.compactMap { findController(in: $0) }.first
+        }
         func type(_ text: String) {
             guard let tv = responder() else { failures.append("no focused text view when typing '\(text)'"); return }
             tv.insertText(text, replacementRange: tv.selectedRange())
@@ -354,6 +359,21 @@ enum SelfTest {
             await pause(300)
             check(model.title == "Getting Started", "switching pages loads the other page")
             snapshot("04-welcome")
+
+            // Page switches reuse the rows' cells instead of building new ones each time.
+            if let smokeID = model.pages.first(where: { $0.title == "Smoke test" })?.id,
+               let controller = findController() {
+                await model.open(smokeID); await pause(300)
+                await model.open(welcomeID); await pause(300)
+                let built = controller.cellsCreated
+                for id in [smokeID, welcomeID, smokeID, welcomeID] {
+                    await model.open(id)
+                    await pause(300)
+                }
+                check(controller.cellsCreated == built, "switching between pages already shown builds no new cells, built \(controller.cellsCreated - built)")
+                check(model.title == "Getting Started" && model.editor?.blocks.count == 10, "the welcome page shows again after reused cells")
+                snapshot("04b-welcome-reused")
+            }
         }
 
         if TestHost.focusTakenCount > 0 {
