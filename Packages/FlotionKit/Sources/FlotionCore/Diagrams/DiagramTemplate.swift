@@ -1,8 +1,9 @@
 import Foundation
 
 /// Turns a stored diagram into the HTML document the app's sandboxed web view loads.
-/// Every document gets a strict Content-Security-Policy and the Flotion theme variables;
-/// a steps diagram also gets the slideshow frame, transitions and controls.
+/// Every document gets a strict Content-Security-Policy and the Flotion theme variables.
+/// A Flow diagram is drawn by Flotion's own player from a resolved scene, so none of its
+/// content runs as code; the older steps and html formats carry author-written markup.
 public enum DiagramTemplate {
     /// No network of any kind: only inline styles and scripts, and data: images and fonts.
     public static let contentSecurityPolicy =
@@ -16,11 +17,15 @@ public enum DiagramTemplate {
           color-scheme: light dark;
           --fl-bg: #FFFFFF; --fl-text: #37352F; --fl-muted: #787774; --fl-accent: #2383E2;
           --fl-border: rgba(55,53,47,0.16); --fl-soft: rgba(55,53,47,0.06);
+          --fl-line: rgba(55,53,47,0.48); --fl-node-border: rgba(55,53,47,0.24); --fl-node: #FFFFFF; --fl-group: #F7F7F5;
+          --fl-good: #448361; --fl-warn: #D9730D; --fl-bad: #D44C47;
           --fl-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
         }
         @media (prefers-color-scheme: dark) {
           :root { --fl-bg: #191919; --fl-text: rgba(255,255,255,0.81); --fl-muted: rgba(255,255,255,0.46);
-                  --fl-border: rgba(255,255,255,0.16); --fl-soft: rgba(255,255,255,0.06); }
+                  --fl-border: rgba(255,255,255,0.16); --fl-soft: rgba(255,255,255,0.06);
+                  --fl-line: rgba(255,255,255,0.42); --fl-node-border: rgba(255,255,255,0.20); --fl-node: #262626; --fl-group: #202020;
+                  --fl-accent: #4A9FF0; --fl-good: #5BB98C; --fl-warn: #F0A04B; --fl-bad: #F2766F; }
         }
         html, body { margin: 0; height: 100%; background: transparent; color: var(--fl-text);
                      font-family: var(--fl-font); font-size: 14px; -webkit-font-smoothing: antialiased; }
@@ -31,6 +36,7 @@ public enum DiagramTemplate {
         switch diagram.format {
         case .html: htmlDocument(diagram.source)
         case .steps: stepsDocument((try? decodeJSON([DiagramStep].self, diagram.source)) ?? [])
+        case .flow: (try? FlowScene(source: diagram.source)).map(flowDocument) ?? htmlDocument("<p style=\"color:var(--fl-muted)\">This diagram could not be read.</p>")
         }
     }
 
@@ -126,6 +132,252 @@ public enum DiagramTemplate {
             </body></html>
             """
     }
+
+    // MARK: Flow
+
+    /// The scene travels as JSON in a data block. Text from it only ever reaches the page through
+    /// `textContent`, and `<` is escaped so no label can close the block early.
+    public static func flowDocument(_ scene: FlowScene) -> String {
+        let json = ((try? encodeJSON(scene)) ?? "{}").replacingOccurrences(of: "<", with: "\\u003c")
+        return """
+            <!doctype html><html><head>\(head)<style>\(flowStyle)</style></head>
+            <body>
+            <div class="fig" id="fig" tabindex="0">
+              <svg class="stage" id="stage" role="img"></svg>
+              <div class="cap"><div class="cap-title" id="cap-title"></div><div class="cap-text" id="cap-text"></div></div>
+              <div class="controls">
+                <button class="nav" id="prev" aria-label="Previous step"><svg viewBox="0 0 16 16"><path d="M10 3.5 5.5 8l4.5 4.5"/></svg></button>
+                <div class="dots" id="dots"></div>
+                <button class="nav" id="next" aria-label="Next step"><svg viewBox="0 0 16 16"><path d="M6 3.5 10.5 8 6 12.5"/></svg></button>
+                <button class="nav play" id="play" aria-label="Play"><svg viewBox="0 0 16 16"><path id="play-icon" d=""/></svg></button>
+              </div>
+            </div>
+            <script type="application/json" id="scene">\(json)</script>
+            <script>\(flowPlayer)</script>
+            </body></html>
+            """
+    }
+
+    static let flowStyle = #"""
+        body { overflow: hidden; }
+        .fig { outline: none; }
+        .stage { display: block; margin: 0 auto; width: 100%; height: auto; overflow: visible; }
+        .stage.no-anim, .stage.no-anim * { transition: none !important; }
+
+        .group rect { fill: var(--fl-group); }
+        .group text { fill: var(--fl-muted); font-size: 12px; font-weight: 500; }
+        .group, .node, .edge, .elabel { transition: opacity .3s ease; }
+        .off { opacity: 0; }
+        .dim { opacity: .28; }
+
+        .node .inner { transform-box: fill-box; transform-origin: center; transition: transform .38s cubic-bezier(.2,.8,.2,1); }
+        .node.off .inner { transform: scale(.94); }
+        .shape { fill: var(--fl-node); stroke: var(--fl-node-border); stroke-width: 1.25; transition: fill .3s ease, stroke .3s ease; }
+        .ring { fill: none; stroke: var(--fl-accent); stroke-width: 1.5; opacity: 0; pointer-events: none; }
+        .label { fill: var(--fl-text); font-size: 14px; font-weight: 500; transition: transform .3s ease, opacity .14s ease, fill .3s ease; }
+        .tag { fill: var(--fl-muted); font-size: 12px; transition: opacity .14s ease, fill .3s ease; }
+        .node[data-tone="accent"] { --tone: var(--fl-accent); }
+        .node[data-tone="good"] { --tone: var(--fl-good); }
+        .node[data-tone="warn"] { --tone: var(--fl-warn); }
+        .node[data-tone="bad"] { --tone: var(--fl-bad); }
+        .node[data-tone]:not([data-tone="muted"]) .shape { stroke: var(--tone); fill: color-mix(in srgb, var(--tone) 10%, var(--fl-node)); }
+        .node[data-tone]:not([data-tone="muted"]) .tag { fill: var(--tone); }
+        .node[data-tone="muted"] .shape { stroke-dasharray: 3 3; }
+        .node[data-tone="muted"] .label { fill: var(--fl-muted); }
+
+        .line { fill: none; stroke: var(--fl-line); stroke-width: 1.25; stroke-linecap: round;
+                transition: stroke .25s ease, stroke-width .25s ease, stroke-dashoffset .5s ease .1s; }
+        .edge.solid .line { stroke-dasharray: 1; stroke-dashoffset: 0; }
+        .edge.solid.off .line { stroke-dashoffset: 1; }
+        .edge.dashed .line { stroke-dasharray: 4 4; }
+        .head { fill: var(--fl-line); stroke: var(--fl-line); stroke-width: 1; stroke-linejoin: round; opacity: 0;
+                transition: opacity .15s ease, fill .25s ease, stroke .25s ease; }
+        .edge.at-hi .head.hi, .edge.at-lo .head.lo { opacity: 1; transition: opacity .25s ease .3s, fill .25s ease, stroke .25s ease; }
+        .edge.live .line { stroke: var(--fl-accent); stroke-width: 1.6; }
+        .edge.live .head { fill: var(--fl-accent); stroke: var(--fl-accent); }
+        .elabel { fill: var(--fl-muted); font-size: 12.5px; font-weight: 500; paint-order: stroke; stroke: var(--fl-bg);
+                  stroke-width: 6px; stroke-linejoin: round; }
+        .elabel.in-group { stroke: var(--fl-group); }
+        .elabel.live { fill: var(--fl-accent); }
+        .token { fill: var(--fl-accent); }
+
+        .cap { box-sizing: border-box; height: 66px; padding: 8px 16px 0; text-align: center; overflow: hidden; }
+        .cap-title { font-size: 14px; line-height: 18px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+                     transition: opacity .14s ease; }
+        .cap-text { margin-top: 2px; font-size: 13px; line-height: 18px; color: var(--fl-muted); transition: opacity .14s ease;
+                    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+        .controls { display: flex; align-items: center; justify-content: center; gap: 8px; height: 34px; }
+        .controls button { all: unset; cursor: pointer; }
+        .controls .nav { width: 24px; height: 24px; border-radius: 5px; display: grid; place-items: center; color: var(--fl-muted);
+                         opacity: 0; transition: opacity .18s ease, background .12s ease; }
+        .controls .nav svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+        .controls .nav.play svg { fill: currentColor; stroke: none; }
+        .controls .nav:hover { background: var(--fl-soft); color: var(--fl-text); }
+        .controls .nav[disabled] { visibility: hidden; }
+        .fig:hover .controls .nav, .fig:focus-within .controls .nav { opacity: 1; }
+        .dots { display: flex; gap: 5px; align-items: center; }
+        .controls .dot { width: 6px; height: 6px; border-radius: 3px; background: var(--fl-node-border); transition: width .25s ease, background .25s ease; }
+        .controls .dot.on { width: 16px; background: var(--fl-accent); }
+        .static .cap, .static .controls { display: none; }
+        @media (prefers-reduced-motion: reduce) { .stage, .stage *, .cap * { transition: none !important; } }
+        """#
+
+    /// Draws the scene once, then moves between steps by switching each element's state and letting
+    /// CSS transitions do the rest. The only scripted motion is the dot that travels an edge on `send`.
+    static let flowPlayer = #"""
+        (function () {
+          const S = JSON.parse(document.getElementById('scene').textContent);
+          const NS = 'http://www.w3.org/2000/svg';
+          const el = (name, attrs, text) => {
+            const e = document.createElementNS(NS, name);
+            for (const k in attrs) e.setAttribute(k, attrs[k]);
+            if (text != null) e.textContent = text;
+            return e;
+          };
+          const $ = id => document.getElementById(id);
+          const fig = $('fig'), stage = $('stage');
+          stage.setAttribute('viewBox', [S.x, S.y, S.w, S.h].join(' '));
+          stage.style.maxWidth = S.w + 'px';
+          if (!S.stepped) fig.classList.add('static');
+          const layer = () => stage.appendChild(el('g', {}));
+          const gGroups = layer(), gEdges = layer(), gLabels = layer(), gNodes = layer(), gTokens = layer();
+
+          const groups = S.groups.map(g => {
+            const e = gGroups.appendChild(el('g', { class: 'group' }));
+            if (g.w) e.append(el('rect', { x: g.x, y: g.y, width: g.w, height: g.h, rx: 12 }), el('text', { x: g.x + 14, y: g.y + 20 }, g.title));
+            return e;
+          });
+          const edges = S.edges.map(d => {
+            const e = gEdges.appendChild(el('g', { class: 'edge ' + (d.solid ? 'solid' : 'dashed') }));
+            const line = e.appendChild(el('path', { class: 'line' }));
+            if (d.solid) line.setAttribute('pathLength', 1);
+            e.append(el('path', { class: 'head hi', d: d.headHi }), el('path', { class: 'head lo', d: d.headLo }));
+            const label = gLabels.appendChild(el('text', { class: 'elabel' + (d.inGroup ? ' in-group' : ''), x: d.lx, y: d.ly, dy: '.35em', 'text-anchor': d.anchor }));
+            return { e, line, label };
+          });
+          const nodes = S.nodes.map(d => {
+            const e = gNodes.appendChild(el('g', { class: 'node', transform: 'translate(' + d.x + ',' + d.y + ')' }));
+            const inner = e.appendChild(el('g', { class: 'inner' }));
+            const ring = el('path', { class: 'ring', d: d.d });
+            const label = el('text', { class: 'label', 'text-anchor': 'middle', dy: '.35em', y: d.sink });
+            const tag = el('text', { class: 'tag', 'text-anchor': 'middle', dy: '.35em', y: d.sink + 11 });
+            inner.append(el('path', { class: 'shape', d: d.d }), ring, label, tag);
+            return { e, ring, label, tag };
+          });
+          const dots = S.steps.map((_, i) => {
+            const dot = $('dots').appendChild(document.createElement('button'));
+            dot.className = 'dot';
+            dot.setAttribute('aria-label', 'Step ' + (i + 1));
+            dot.onclick = () => { stop(); go(i, true); };
+            return dot;
+          });
+
+          const still = matchMedia('(prefers-reduced-motion: reduce)');
+          let index = 0, run = 0, timer = null;
+
+          function swap(e, text, animate) {
+            clearTimeout(e._swap);
+            if (e.textContent === text) { e.style.opacity = ''; return; }
+            if (!animate) { e.textContent = text; e.style.opacity = ''; return; }
+            e.style.opacity = 0;
+            e._swap = setTimeout(() => { e.textContent = text; e.style.opacity = ''; }, 140);
+          }
+
+          function go(i, animate) {
+            index = Math.max(0, Math.min(S.steps.length - 1, i));
+            animate = animate && !still.matches;
+            const step = S.steps[index], token = ++run;
+            gTokens.textContent = '';
+            step.groups.forEach((s, k) => { groups[k].classList.toggle('off', !s.on); groups[k].classList.toggle('dim', s.dim); });
+            step.nodes.forEach((s, k) => {
+              const n = nodes[k];
+              n.e.classList.toggle('off', !s.on);
+              n.e.classList.toggle('dim', s.dim);
+              if (s.tone) n.e.dataset.tone = s.tone; else delete n.e.dataset.tone;
+              swap(n.label, s.label, animate);
+              swap(n.tag, s.tag, animate);
+              n.label.style.transform = s.tag ? 'translateY(-10px)' : '';
+            });
+            step.edges.forEach((s, k) => {
+              const d = S.edges[k], e = edges[k];
+              e.line.setAttribute('d', s.hi ? d.lineHi : d.lineLo);
+              e.e.classList.toggle('off', !s.on);
+              e.e.classList.toggle('dim', s.dim);
+              e.e.classList.toggle('live', s.live);
+              e.e.classList.toggle('at-hi', s.hi);
+              e.e.classList.toggle('at-lo', !s.hi);
+              e.label.classList.toggle('off', !s.on);
+              e.label.classList.toggle('dim', s.dim);
+              e.label.classList.toggle('live', s.live);
+              swap(e.label, s.label, animate);
+            });
+            swap($('cap-title'), step.title, animate);
+            swap($('cap-text'), step.caption, animate);
+            dots.forEach((dot, k) => dot.classList.toggle('on', k === index));
+            $('prev').disabled = index === 0;
+            $('next').disabled = index === S.steps.length - 1;
+            if (animate) step.sends.forEach((send, order) => travel(send, order, token));
+          }
+
+          // A dot runs the edge from sender to receiver, then the receiver's outline pulses once.
+          function travel(send, order, token) {
+            const path = edges[send.edge].line, length = path.getTotalLength();
+            const dot = gTokens.appendChild(el('circle', { class: 'token', r: 3.5, opacity: 0 }));
+            const startAt = performance.now() + 140 + order * 480, duration = Math.min(900, Math.max(460, length * 2.8));
+            const tick = now => {
+              if (token !== run) { dot.remove(); return; }
+              const t = (now - startAt) / duration;
+              if (t >= 1) {
+                dot.remove();
+                nodes[send.to].ring.animate([{ opacity: .5, strokeWidth: '1.5px' }, { opacity: 0, strokeWidth: '10px' }], { duration: 520, easing: 'ease-out' });
+                return;
+              }
+              if (t > 0) {
+                const u = t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+                const p = path.getPointAtLength((send.forward ? u : 1 - u) * length);
+                dot.setAttribute('cx', p.x);
+                dot.setAttribute('cy', p.y);
+                dot.setAttribute('opacity', Math.min(1, t * 8, (1 - t) * 8));
+              }
+              requestAnimationFrame(tick);
+            };
+            requestAnimationFrame(tick);
+          }
+
+          function icon(playing) {
+            $('play-icon').setAttribute('d', playing ? 'M4.5 3.5h2.4v9H4.5zM9.1 3.5h2.4v9H9.1z' : 'M5 3.2v9.6L12.6 8z');
+            $('play').setAttribute('aria-label', playing ? 'Pause' : 'Play');
+          }
+          function stop() { clearTimeout(timer); timer = null; icon(false); }
+          function start() {
+            if (index === S.steps.length - 1) go(0, true);
+            icon(true);
+            const wait = () => 2300 + S.steps[index].sends.length * 480;
+            const advance = () => {
+              if (index >= S.steps.length - 1) { stop(); return; }
+              go(index + 1, true);
+              timer = setTimeout(advance, wait());
+            };
+            timer = setTimeout(advance, wait());
+          }
+          $('prev').onclick = () => { stop(); go(index - 1, true); };
+          $('next').onclick = () => { stop(); go(index + 1, true); };
+          $('play').onclick = () => { timer ? stop() : start(); };
+          document.addEventListener('keydown', e => {
+            if (!S.stepped) return;
+            if (e.key === 'ArrowRight') { stop(); go(index + 1, true); e.preventDefault(); }
+            if (e.key === 'ArrowLeft') { stop(); go(index - 1, true); e.preventDefault(); }
+            if (e.key === ' ') { timer ? stop() : start(); e.preventDefault(); }
+          });
+
+          window.flotion = { count: S.steps.length, go: i => { stop(); go(i, true); }, index: () => index };
+          icon(false);
+          stage.classList.add('no-anim');
+          go(0, false);
+          stage.getBoundingClientRect();
+          stage.classList.remove('no-anim');
+        })();
+        """#
 
     static func escape(_ text: String) -> String {
         text.replacingOccurrences(of: "&", with: "&amp;")

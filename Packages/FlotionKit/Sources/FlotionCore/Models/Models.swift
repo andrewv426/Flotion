@@ -128,7 +128,9 @@ public struct Block: Codable, Sendable, Identifiable, Equatable {
 
 // MARK: - Diagrams
 
-public enum DiagramFormat: String, Codable, Sendable { case html, steps }
+/// `flow` is the diagram language (see `FlowParser`). `html` is a free-form escape hatch.
+/// `steps` is the older slideshow of hand-written SVG; it still renders but is no longer created.
+public enum DiagramFormat: String, Codable, Sendable { case html, steps, flow }
 
 public struct DiagramStep: Codable, Sendable, Equatable {
     public var title: String?
@@ -145,7 +147,7 @@ public struct Diagram: Codable, Sendable, Identifiable, Equatable {
     public var id: String
     public var title: String
     public var format: DiagramFormat
-    /// A full HTML document for `.html`; a JSON array of `DiagramStep` for `.steps`.
+    /// Flow source for `.flow`; a full HTML document for `.html`; a JSON array of `DiagramStep` for `.steps`.
     public var source: String
     public var height: Double
     public var updatedAt: Date

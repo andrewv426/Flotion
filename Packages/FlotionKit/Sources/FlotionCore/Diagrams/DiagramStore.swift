@@ -16,6 +16,9 @@ public enum DiagramValidator {
             throw FlotionError.invalid("Diagram source is \(source.utf8.count) bytes; the limit is \(maxBytes).")
         }
         switch format {
+        case .flow:
+            let issues = FlowParser.parse(source).issues
+            guard issues.isEmpty else { throw FlotionError.invalid(FlowIssue.report(issues)) }
         case .html:
             try checkSelfContained(source)
         case .steps:
@@ -59,7 +62,7 @@ public extension Workspace {
     func createDiagram(pageID: String, title: String, format: DiagramFormat, source: String, height: Double? = nil,
                        at position: InsertPosition = .end, context: ChangeContext? = nil) throws -> (diagram: Diagram, block: Block) {
         try DiagramValidator.validate(format: format, source: source)
-        let diagram = Diagram(title: title, format: format, source: source, height: Self.clampHeight(height))
+        let diagram = Diagram(title: title, format: format, source: source, height: try Self.height(format, source, requested: height))
         let block = try pool.write { db -> Block in
             guard try Self.fetchPage(db, pageID) != nil else { throw FlotionError.notFound("page \(pageID)") }
             try Self.writeDiagram(db, diagram)
@@ -80,8 +83,8 @@ public extension Workspace {
             if let title { diagram.title = title }
             if let format { diagram.format = format }
             if let source { diagram.source = source }
-            if let height { diagram.height = Self.clampHeight(height) }
             try DiagramValidator.validate(format: diagram.format, source: diagram.source)
+            diagram.height = try Self.height(diagram.format, diagram.source, requested: height ?? diagram.height)
             diagram.updatedAt = Date()
             try Self.writeDiagram(db, diagram)
             return diagram
@@ -99,6 +102,12 @@ public extension Workspace {
 
 extension Workspace {
     static func clampHeight(_ height: Double?) -> Double { min(1200, max(120, height ?? 360)) }
+
+    /// A Flow diagram's height comes from its own layout, at full size; the other formats take the author's.
+    static func height(_ format: DiagramFormat, _ source: String, requested: Double?) throws -> Double {
+        guard format == .flow else { return clampHeight(requested) }
+        return try FlowScene(source: source).displayHeight(forWidth: .infinity)
+    }
 
     static func fetchDiagram(_ db: Database, _ id: String) throws -> Diagram? {
         try Row.fetchOne(db, sql: "SELECT id, title, format, source, height, updated_at FROM diagrams WHERE id = ?", arguments: [id]).map { row in

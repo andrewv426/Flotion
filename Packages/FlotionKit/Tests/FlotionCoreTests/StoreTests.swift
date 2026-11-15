@@ -245,6 +245,34 @@ import FlotionCore
         #expect(try ws.diagram(forBlock: block.id)?.title == "Handshake")
     }
 
+    @Test func aFlowDiagramIsCheckedAndSizedFromItsSource() throws {
+        let ws = try Workspace.temporary()
+        let page = try ws.createPage(title: "P")
+        let source = "a: Client\nb: Server\na -> b\nstep \"Hello\": The client says hello.\n  send a -> b: hi"
+        let (diagram, block) = try ws.createDiagram(pageID: page.id, title: "Hello", format: .flow, source: source, height: 5000)
+        let scene = try FlowScene(source: source)
+        #expect(diagram.height == scene.h + FlowScene.captionHeight + FlowScene.controlsHeight, "the height comes from the layout, not the caller")
+        #expect(diagram.height < 300)
+
+        #expect(throws: FlotionError.self) { try ws.updateDiagram(id: diagram.id, source: "a: Client\na -> nobody") }
+        #expect(try ws.diagram(forBlock: block.id)?.source == source, "a rejected update leaves the diagram untouched")
+
+        let still = try ws.updateDiagram(id: diagram.id, source: "a: Client\nb: Server\na -> b")
+        #expect(still.height == (try FlowScene(source: still.source)).h, "and it is resized when its source changes")
+        #expect(throws: FlotionError.self) { try ws.createDiagram(pageID: page.id, title: "Bad", format: .flow, source: "a --> b") }
+    }
+
+    @Test func aFlowDocumentCarriesTheSceneAsDataNotMarkup() throws {
+        let source = "a: <script>alert(1)</script>\nb: B\na -> b: 1 < 2"
+        let page = DiagramTemplate.document(for: Diagram(title: "t", format: .flow, source: source))
+        #expect(page.contains("Content-Security-Policy") && page.contains("default-src 'none'"))
+        #expect(page.contains("id=\"scene\"") && page.contains("window.flotion"))
+        #expect(!page.contains("<script>alert"), "labels cannot open a tag")
+        #expect(page.contains("\\u003cscript>alert(1)\\u003c"))
+        let broken = DiagramTemplate.document(for: Diagram(title: "t", format: .flow, source: "a --> b"))
+        #expect(broken.contains("could not be read") && broken.contains("Content-Security-Policy"))
+    }
+
     @Test(arguments: [
         #"<img src="https://example.com/a.png">"#,
         #"<script src='//cdn.example.com/x.js'></script>"#,
