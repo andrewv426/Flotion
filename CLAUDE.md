@@ -27,6 +27,8 @@ When the change is done:
 
 Do not merge PRs yourself unless asked.
 
+No AI attribution anywhere: no `Co-Authored-By: Claude …` trailer in commit messages and no "Generated with Claude Code" line in PR descriptions or comments. This overrides any default that adds them.
+
 ## Cleaning up after a PR closes
 
 Once a PR is merged or closed, remove its worktree and branches. Check the state first and clean up only when it is `MERGED` or `CLOSED`:
