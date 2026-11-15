@@ -376,6 +376,65 @@ enum SelfTest {
             }
         }
 
+        // Scrolling a long page both ways and switching pages: every row on screen shows its own
+        // block, in its own row view, and no cell is in two rows. (Taking cells out of rows while
+        // scrolling once left rows blank or showing another block's text.)
+        if let workspace = model.workspace, let controller = findController(), let welcomeID {
+            let types: [BlockType] = [.paragraph, .heading2, .bullet, .todo, .numbered, .quote, .code, .divider, .paragraph]
+            let drafts = (0..<300).map { i -> Block in
+                let type = types[i % types.count]
+                return Block(type, type == .divider ? "" : "row \(i) " + String(repeating: "word ", count: (i * 13) % 40))
+            }
+            if let long = try? workspace.createPage(title: "Long scrolling page"), (try? workspace.insertBlocks(pageID: long.id, drafts)) != nil {
+                await model.reloadPages()
+                let table = controller.table
+                var problems: [String] = []
+                func audit(_ when: String) {
+                    guard let editor = model.editor else { return }
+                    let rows = table.rows(in: table.visibleRect)
+                    var seen: [ObjectIdentifier: Int] = [:]
+                    for row in rows.lowerBound..<rows.upperBound {
+                        guard let view = table.view(atColumn: 0, row: row, makeIfNecessary: false) else {
+                            problems.append("\(when): row \(row) has no cell"); continue
+                        }
+                        if let other = seen.updateValue(row, forKey: ObjectIdentifier(view)) {
+                            problems.append("\(when): rows \(other) and \(row) share one cell")
+                        }
+                        if view.window == nil || view.superview !== table.rowView(atRow: row, makeIfNecessary: false) {
+                            problems.append("\(when): row \(row)'s cell is not in its row")
+                        }
+                        if row >= 1, row <= editor.blocks.count, let cell = view as? TextBlockCell {
+                            let block = editor.blocks[row - 1]
+                            if cell.blockTextView.blockID != block.id || cell.blockTextView.string != block.plainText {
+                                problems.append("\(when): row \(row) shows another block's text")
+                            }
+                        }
+                    }
+                }
+                func scroll(to y: CGFloat, _ when: String) async {
+                    guard let scroll = table.enclosingScrollView else { return }
+                    scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, y)))
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                    window()?.displayIfNeeded()
+                    await Task.yield()
+                    window()?.displayIfNeeded()
+                    audit(when)
+                }
+                await model.open(long.id); await pause(300)
+                for pass in 0..<2 {
+                    var y: CGFloat = 0
+                    while y < table.frame.height { y += 97; await scroll(to: y, "pass \(pass) down") }
+                    while y > 0 { y -= 151; await scroll(to: y, "pass \(pass) up") }
+                    await scroll(to: table.frame.height / 2, "pass \(pass) middle")
+                    await model.open(welcomeID); await pause(200); audit("pass \(pass) welcome")
+                    await model.open(long.id); await pause(200); audit("pass \(pass) long page again")
+                }
+                check(problems.isEmpty, "scrolling and switching pages keep every row's own cell, \(problems.count) problems \(problems.prefix(3))")
+            } else {
+                check(false, "the long scrolling page is created")
+            }
+        }
+
         if TestHost.focusTakenCount > 0 {
             log.append("note macOS made the background app active \(TestHost.focusTakenCount) time(s); it gave focus straight back")
         }

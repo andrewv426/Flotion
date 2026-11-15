@@ -89,9 +89,10 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
     private var flushScheduled = false
     private var widthChangeScheduled = false
     private static let dragType = NSPasteboard.PasteboardType("app.flotion.block-row")
-    /// Reusable cells by kind (see `dequeue`), and how many have been built; the self-test reads the count.
+    /// Cells from earlier pages, detached and kept for the next page's rows (see `dequeue`), and
+    /// how many cells have been built; the self-test reads the count.
     private var spareCells: [NSUserInterfaceItemIdentifier: [NSTableCellView]] = [:]
-    private static let maxSpareCells = 80
+    private static let maxSpareCellsPerKind = 40
     private(set) var cellsCreated = 0
 
     override init() {
@@ -132,6 +133,7 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
         self.title = title
         heights.removeAll(keepingCapacity: true)
         state.onChange = { [weak self] change in self?.apply(change) }
+        collectCellsForReuse()
         table.reloadData()
         table.scrollRowToVisible(0)
         if title.isEmpty, state.blocks.count == 1, state.blocks[0].runs.isEmpty {
@@ -312,21 +314,31 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
         return cell
     }
 
-    /// Rows the table has let go of hand their cells back here for the next rows shown.
-    func tableView(_ tableView: NSTableView, didRemove rowView: NSTableRowView, forRow row: Int) {
-        guard let cell = rowView.view(atColumn: 0) as? NSTableCellView, let id = cell.identifier,
-              spareCells[id, default: []].count < Self.maxSpareCells else { return }
-        // Detached now, so the row view it came from cannot take it back from a later row.
-        cell.removeFromSuperview()
-        spareCells[id, default: []].append(cell)
+    /// Just before a page switch reloads the table: keeps the cells on screen for later pages' rows.
+    /// `makeView(withIdentifier:)` gets none of them back after `reloadData`, so without this every
+    /// page switch built its visible rows from scratch (about 20 ms, whatever the page's size).
+    ///
+    /// Only here, never while scrolling: a row view the table takes off screen can come back with
+    /// its cell still expected inside, so the table alone decides when those cells are free.
+    /// Each cell is detached as it is collected, so the table cannot recycle it as well: the pool
+    /// only ever holds cells the table no longer has. Nothing draws before the reload refills the rows.
+    /// Leftovers stay for later switches (pages need different kinds of cells, a diagram's being
+    /// the costliest), up to a cap per kind.
+    private func collectCellsForReuse() {
+        let rows = table.rows(in: table.visibleRect)
+        for row in rows.lowerBound..<rows.upperBound {
+            guard let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? NSTableCellView,
+                  let id = cell.identifier, spareCells[id, default: []].count < Self.maxSpareCellsPerKind else { continue }
+            cell.removeFromSuperview()
+            spareCells[id, default: []].append(cell)
+        }
     }
 
-    /// Cells come only from `spareCells` (never `makeView(withIdentifier:)` as well), so one cell
-    /// can never be handed to two rows. `makeView` gets nothing back after `reloadData`, so with it
-    /// every page switch built its visible rows from scratch: about 20 ms whatever the page's size.
+    /// The previous page's cells first, then the table's own recycling (scrolling), then a new cell.
     private func dequeue<Cell: NSTableCellView>(_ name: String) -> Cell {
         let id = NSUserInterfaceItemIdentifier(name)
         if let cell = spareCells[id]?.popLast() as? Cell { return cell }
+        if let cell = table.makeView(withIdentifier: id, owner: nil) as? Cell { return cell }
         cellsCreated += 1
         let cell = Cell(frame: NSRect(x: 0, y: 0, width: table.bounds.width, height: 30))
         cell.identifier = id
