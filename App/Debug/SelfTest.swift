@@ -572,6 +572,58 @@ extension SelfTest {
             }
         }
 
+        // The same steadiness with real scroll-wheel events, as a mouse wheel sends them: each is
+        // hit-tested by the window and climbs the responder chain to the scroll view, which does the
+        // scrolling itself. (The checks above set the scroll offset directly.) A trackpad cannot be
+        // stood in for this way: its events carry gesture phases, and after the first of a gesture the
+        // scroll view takes no more of them from the app, so only the first one sent from here moves the page.
+        if let window = window(), let table = find(EditorTableView.self, in: window.contentView), let scroll = table.enclosingScrollView {
+            let clip = scroll.contentView
+            /// Turns the wheel once per frame and follows a row on screen through it. Every turn must
+            /// move that row by the turn's own distance. Returns the largest miss and the distances.
+            func wheel(from start: CGFloat, turns: [CGFloat]) async -> (jump: Double, sent: Double, moved: Double) {
+                clip.scroll(to: NSPoint(x: 0, y: start))
+                scroll.reflectScrolledClipView(clip)
+                window.displayIfNeeded()
+                try? await Task.sleep(for: .milliseconds(300)) // rows measured in the background settle first
+                func middleRow() -> (row: Int, offset: CGFloat) {
+                    let visible = table.rows(in: table.visibleRect)
+                    let row = visible.location + visible.length / 2
+                    return (row, table.rect(ofRow: row).minY - clip.bounds.minY)
+                }
+                var followed = middleRow()
+                var worst = 0.0, sent = 0.0, moved = 0.0
+                for turn in turns {
+                    guard let event = TestHost.wheelEvent(over: scroll, deltaY: turn) else { continue }
+                    window.sendEvent(event)
+                    window.displayIfNeeded()
+                    await Task.yield()
+                    await Task.yield()
+                    window.displayIfNeeded()
+                    let offset = table.rect(ofRow: followed.row).minY - clip.bounds.minY
+                    worst = max(worst, Double(abs(offset - followed.offset - turn)))
+                    sent += Double(turn)
+                    moved += Double(offset - followed.offset)
+                    followed = middleRow()
+                }
+                return (worst, sent, moved)
+            }
+            // Upwards (a positive turn): slowly, then fast.
+            let turns = [CGFloat](repeating: 30, count: 150) + [CGFloat](repeating: 120, count: 100)
+            let start = table.frame.height * 0.8
+            let first = await wheel(from: start, turns: turns)
+            if abs(first.moved) < 1 {
+                failed += 1
+                lines.append("PERF OVER wheel events did not scroll the page")
+            } else {
+                record("wheel up, rows not shown before: largest jump", first.jump, unit: "pt", budget: 1)
+                // The same turns over the same rows, now all measured: what steady looks like.
+                let again = await wheel(from: start, turns: turns)
+                record("wheel up, same rows again: largest jump", again.jump, unit: "pt", budget: 1)
+                lines.append(String(format: "PERF info wheel turned %.0f pt; the page moved %.0f pt, then %.0f pt", first.sent, first.moved, again.moved))
+            }
+        }
+
         lines.append(String(format: "PERF info memory at the end of this stress run: %.1f MB", residentMegabytes()))
         _ = medium // measured separately, in a fresh launch (runMemory)
 

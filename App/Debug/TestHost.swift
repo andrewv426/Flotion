@@ -67,6 +67,20 @@ enum TestHost {
         }
     }
 
+    /// One turn of a mouse wheel over the middle of `view`, `deltaY` points (positive scrolls up),
+    /// for `NSWindow.sendEvent`. Nothing reaches the user's pointer, so it works in the background.
+    static func wheelEvent(over view: NSView, deltaY: CGFloat) -> NSEvent? {
+        guard view.window != nil, let primary = NSScreen.screens.first,
+              let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: Int32(deltaY.rounded()), wheel2: 0, wheel3: 0)
+        else { return nil }
+        // An event made here belongs to no window, and such an event gives its position in screen
+        // coordinates. `NSWindow.sendEvent` reads that position as a point of its own, so the screen
+        // position is given the numbers of the point inside the window. Core Graphics measures from the top.
+        let inWindow = view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
+        event.location = CGPoint(x: inWindow.x, y: primary.frame.height - inWindow.y)
+        return NSEvent(cgEvent: event)
+    }
+
     /// How often a background run was made active (and gave focus back).
     private(set) static var focusTakenCount = 0
 
