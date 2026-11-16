@@ -506,6 +506,72 @@ extension SelfTest {
             record("scroll frame work, 5,000-block page (worst)", samples.max() ?? -1, budget: 16.6)
         }
 
+        // Steadiness: a row in the middle of the screen must move by exactly the scroll step, whatever
+        // happens to the heights of the rows coming into view. The run loop turns between frames, as it
+        // does in the app, so height corrections that are put off to the next turn are included.
+        if let table = find(EditorTableView.self, in: window()?.contentView), let scroll = table.enclosingScrollView {
+            let clip = scroll.contentView
+            func settle() async {
+                window()?.displayIfNeeded()
+                await Task.yield()
+                await Task.yield()
+                window()?.displayIfNeeded()
+            }
+            func jump(to y: CGFloat) async {
+                clip.scroll(to: NSPoint(x: 0, y: y))
+                scroll.reflectScrolledClipView(clip)
+                await settle()
+            }
+            /// The largest distance the middle row ended a frame away from where the scroll step put it.
+            func largestJump(from start: CGFloat, step: CGFloat, frames: Int) async -> Double {
+                await jump(to: start)
+                var worst = 0.0
+                for _ in 0..<frames {
+                    let visible = table.rows(in: table.visibleRect)
+                    let row = visible.location + visible.length / 2
+                    let before = table.rect(ofRow: row).minY - clip.bounds.minY
+                    let from = clip.bounds.minY
+                    clip.scroll(to: NSPoint(x: 0, y: from + step))
+                    scroll.reflectScrolledClipView(clip)
+                    await settle()
+                    let after = table.rect(ofRow: row).minY - clip.bounds.minY
+                    worst = max(worst, Double(abs(after - before + step)))
+                }
+                return worst
+            }
+            // Each run starts somewhere the page has not been scrolled through yet.
+            let end = table.frame.height
+            record("scroll up, rows not shown before: largest jump", await largestJump(from: end - 4_000, step: -30, frames: 300), unit: "pt", budget: 1)
+            record("flick up, rows not shown before: largest jump", await largestJump(from: end - 30_000, step: -120, frames: 200), unit: "pt", budget: 1)
+            record("flick down, rows not shown before: largest jump", await largestJump(from: end / 2, step: 120, frames: 200), unit: "pt", budget: 1)
+
+            // Changing the width (a window resize, the assistant panel opening) re-measures every row.
+            // The top row on screen must stay where it is, and a step must not stall the resize (measuring
+            // every row the table asks about on each step took 80 ms).
+            if let window = window() {
+                await jump(to: end / 3)
+                try? await Task.sleep(for: .milliseconds(400)) // rows measured in the background settle first
+                let original = window.frame
+                let row = table.rows(in: table.visibleRect).location + 1
+                let before = table.rect(ofRow: row).minY - clip.bounds.minY
+                var steps: [Double] = []
+                for k in 0..<60 {
+                    var frame = window.frame
+                    frame.size.width += k < 30 ? -6 : 6
+                    let start = CACurrentMediaTime()
+                    window.setFrame(frame, display: true)
+                    await settle()
+                    steps.append((CACurrentMediaTime() - start) * 1000)
+                }
+                window.setFrame(original, display: true)
+                await settle()
+                try? await Task.sleep(for: .milliseconds(600))
+                await settle()
+                record("width change step work, 5,000-block page (p95)", percentile(steps, 0.95), budget: 33)
+                record("width changed and back mid-page: movement of the top row", Double(abs(table.rect(ofRow: row).minY - clip.bounds.minY - before)), unit: "pt", budget: 3)
+            }
+        }
+
         lines.append(String(format: "PERF info memory at the end of this stress run: %.1f MB", residentMegabytes()))
         _ = medium // measured separately, in a fresh launch (runMemory)
 

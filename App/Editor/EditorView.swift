@@ -82,11 +82,30 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
     /// Where a "/" is about to be typed, recorded before the edit so the menu opens only for a typed slash.
     private var typedSlashAt: Int?
 
-    /// Exact heights of rows that have been laid out; other rows use an estimate
-    /// so a long page paints without measuring every block first.
+    /// Measured heights, by block. A row is measured when the table asks for its height, so the
+    /// table never has to be corrected about a row it is showing (see `tableView(_:heightOfRow:)`).
     private var heights: [String: CGFloat] = [:]
     private var staleRows = IndexSet()
     private var flushScheduled = false
+    /// Whether the next flush keeps the rows on screen where they are (see `noteHeights`).
+    private var holdPositionOnFlush = false
+    /// Rows the table was given an estimate for, because measuring them all at once would stall
+    /// the page. They are measured a few at a time afterwards (see `settlePendingRows`).
+    private var pendingRows = IndexSet()
+    private var settleScheduled = false
+    /// The rows on screen and about a screenful either side, as of the last scroll. These are
+    /// always measured, whatever the time already spent.
+    private var nearRows = 0..<0
+    private var resolveAheadScheduled = false
+    private static let lookaheadRows = 60
+    private var measureWindowStart = 0.0
+    private var measureSpent = 0.0
+    /// Until this time only `nearRows` are measured and settling waits: a page is opening, or the
+    /// width is changing (on every frame, while a window is dragged wider).
+    private var busyUntil = 0.0
+    /// Measuring time allowed in any `measureWindow`, both in seconds: half a 120 Hz frame.
+    private static let measureSlice = 0.004
+    private static let measureWindow = 0.008
     private var widthChangeScheduled = false
     private static let dragType = NSPasteboard.PasteboardType("app.flotion.block-row")
 
@@ -114,7 +133,11 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
         // The slash menu is its own window, so it follows the "/" when the page scrolls.
         scrollView.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.slashMenu?.reposition() }
+            MainActor.assumeIsolated {
+                self?.slashMenu?.reposition()
+                self?.refreshNearRows()
+                self?.scheduleResolveAhead()
+            }
         }
     }
 
@@ -127,6 +150,11 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
         self.state = state
         self.title = title
         heights.removeAll(keepingCapacity: true)
+        pendingRows.removeAll()
+        // The page opens at its top. Its first screenful is measured before it is drawn (no row is
+        // shorter than 30 points); the rest of what the table asks about waits until it is on screen.
+        nearRows = 0..<max(30, Int(scrollView.contentView.bounds.height / 30) + 2)
+        busyUntil = CACurrentMediaTime() + 0.05
         state.onChange = { [weak self] change in self?.apply(change) }
         table.reloadData()
         table.scrollRowToVisible(0)
@@ -150,6 +178,8 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
         case .structure:
             clearSelection()
             closeSlashMenu()
+            // Row numbers change, and the table asks again for every height it needs.
+            pendingRows.removeAll()
             table.reloadData()
         case .rows(let indexes):
             for i in indexes where state.blocks.indices.contains(i) {
@@ -240,13 +270,71 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
         return style.top + RichText.height(of: text, width: width, lineHeight: style.lineHeight) + style.bottom
     }
 
-    /// Measures a row that is about to be shown; if the estimate was off, corrects it after this pass.
+    /// Measures a block and remembers the result, counting the time against `measureSlice`.
+    private func measuredHeight(_ block: Block) -> CGFloat {
+        let start = CACurrentMediaTime()
+        let exact = exactHeight(block)
+        measureSpent += CACurrentMediaTime() - start
+        heights[block.id] = exact
+        return exact
+    }
+
+    /// Whether there is time left to measure a row away from the screen. When the table asks for
+    /// hundreds of heights in one go (a page opening, the width changing), the rest get an estimate.
+    private func canMeasureFarRow() -> Bool {
+        let now = CACurrentMediaTime()
+        guard now >= busyUntil else { return false }
+        if now - measureWindowStart > Self.measureWindow {
+            measureWindowStart = now
+            measureSpent = 0
+        }
+        return measureSpent < Self.measureSlice
+    }
+
+    private func refreshNearRows() {
+        let visible = table.rows(in: table.visibleRect)
+        let margin = max(visible.length, 20)
+        nearRows = max(0, visible.location - margin)..<(visible.location + visible.length + margin)
+    }
+
+    /// Measures the rows that were given an estimate, nearest the screen first, a slice at a time,
+    /// so every row has its real height well before it can be scrolled into view.
+    private func scheduleSettle() {
+        guard !settleScheduled else { return }
+        settleScheduled = true
+        let wait = max(0, busyUntil - CACurrentMediaTime())
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in self?.settlePendingRows() }
+    }
+
+    private func settlePendingRows() {
+        settleScheduled = false
+        guard let state, !pendingRows.isEmpty else { return }
+        guard CACurrentMediaTime() >= busyUntil else { return scheduleSettle() }
+        let visible = table.rows(in: table.visibleRect)
+        let centre = visible.location + visible.length / 2
+        let start = CACurrentMediaTime()
+        var changed = IndexSet()
+        while CACurrentMediaTime() - start < Self.measureSlice {
+            let below = pendingRows.integerGreaterThanOrEqualTo(centre), above = pendingRows.integerLessThan(centre)
+            guard let row = [below, above].compactMap({ $0 }).min(by: { abs($0 - centre) < abs($1 - centre) }) else { break }
+            pendingRows.remove(row)
+            guard state.blocks.indices.contains(row - 1) else { continue }
+            let block = state.blocks[row - 1]
+            guard heights[block.id] == nil else { continue }
+            if abs(measuredHeight(block) - estimatedHeight(block)) > 0.5 { changed.insert(row) }
+        }
+        noteHeights(changed, holdingPosition: true)
+        if !pendingRows.isEmpty { scheduleSettle() }
+    }
+
+    /// A row that is about to be shown with an estimate still standing (it came on screen before
+    /// `settlePendingRows` reached it): measures it and corrects the table after this pass.
     private func settleHeight(_ block: Block, row: Int) {
         guard heights[block.id] == nil else { return }
-        let exact = exactHeight(block)
-        heights[block.id] = exact
-        if abs(exact - estimatedHeight(block)) > 0.5 {
+        pendingRows.remove(row)
+        if abs(measuredHeight(block) - estimatedHeight(block)) > 0.5 {
             staleRows.insert(row)
+            holdPositionOnFlush = true
             guard !flushScheduled else { return }
             flushScheduled = true
             DispatchQueue.main.async { [weak self] in self?.flushHeights() }
@@ -255,13 +343,65 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
 
     private func flushHeights() {
         flushScheduled = false
+        let hold = holdPositionOnFlush
+        holdPositionOnFlush = false
         guard !staleRows.isEmpty else { return }
         let rows = staleRows.filteredIndexSet { $0 < table.numberOfRows }
         staleRows.removeAll()
-        NSAnimationContext.beginGrouping()
-        NSAnimationContext.current.duration = 0
-        table.noteHeightOfRows(withIndexesChanged: rows)
-        NSAnimationContext.endGrouping()
+        noteHeights(rows, holdingPosition: hold)
+    }
+
+    /// Tells the table that these rows' heights changed, optionally `holdingPosition`.
+    /// Not held for typing, where the edited row itself is the one that should stay put.
+    private func noteHeights(_ rows: IndexSet, holdingPosition hold: Bool) {
+        guard !rows.isEmpty else { return }
+        let note = {
+            NSAnimationContext.beginGrouping()
+            NSAnimationContext.current.duration = 0
+            self.table.noteHeightOfRows(withIndexesChanged: rows)
+            NSAnimationContext.endGrouping()
+        }
+        if hold { holdingPosition(changing: rows, note) } else { note() }
+    }
+
+    /// Runs `change`, which alters the heights of rows, and keeps what is being read where it is.
+    /// The table keeps its scroll offset when a row changes height, so a change above the screen
+    /// would move everything on it; here the offset moves by the same amount instead.
+    private func holdingPosition(changing rows: IndexSet = [], _ change: () -> Void) {
+        let clip = scrollView.contentView
+        let visible = table.rows(in: table.visibleRect)
+        guard visible.length > 0 else { return change() }
+        // The row nearest the middle of the screen that is not itself changing; if they all are, the top one.
+        let middle = visible.location + visible.length / 2
+        let row = (visible.location..<visible.location + visible.length).filter { !rows.contains($0) }
+            .min { abs($0 - middle) < abs($1 - middle) } ?? visible.location
+        let offset = table.rect(ofRow: row).minY - clip.bounds.minY
+        change()
+        let shift = table.rect(ofRow: row).minY - clip.bounds.minY - offset
+        guard abs(shift) > 0.5 else { return }
+        clip.scroll(to: clip.constrainBoundsRect(clip.bounds.offsetBy(dx: 0, dy: shift)).origin)
+        scrollView.reflectScrolledClipView(clip)
+    }
+
+    /// The table works out row positions a block of about a hundred rows at a time, and only when
+    /// the screen reaches a block. Done at that moment, the rows just scrolled into view land where
+    /// its guess put them, a jump of up to a few lines. So after each scroll the blocks a little
+    /// beyond the screen are worked out early, while nothing in them shows.
+    private func scheduleResolveAhead() {
+        guard !resolveAheadScheduled else { return }
+        resolveAheadScheduled = true
+        DispatchQueue.main.async { [weak self] in self?.resolveAhead() }
+    }
+
+    private func resolveAhead() {
+        resolveAheadScheduled = false
+        let visible = table.rows(in: table.visibleRect)
+        guard state != nil, visible.length > 0 else { return }
+        let last = table.numberOfRows - 1
+        holdingPosition {
+            _ = table.rect(ofRow: max(0, visible.location - Self.lookaheadRows))
+            _ = table.rect(ofRow: min(last, visible.location + visible.length + Self.lookaheadRows))
+        }
     }
 
     /// The table reports width changes from inside its own layout pass, where calling
@@ -274,11 +414,15 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
             widthChangeScheduled = false
             slashMenu?.reposition()
             guard state != nil, table.numberOfRows > 0 else { return }
+            // Every height is out of date. A window being dragged wider changes width on every
+            // frame, so only the rows on screen are measured now; the rest get estimates and are
+            // measured once the width has stopped changing.
             heights.removeAll(keepingCapacity: true)
-            NSAnimationContext.beginGrouping()
-            NSAnimationContext.current.duration = 0
-            table.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<table.numberOfRows))
-            NSAnimationContext.endGrouping()
+            pendingRows.removeAll()
+            let visible = table.rows(in: table.visibleRect)
+            nearRows = max(0, visible.location - 4)..<(visible.location + visible.length + 4)
+            busyUntil = CACurrentMediaTime() + 0.15
+            noteHeights(IndexSet(integersIn: 0..<table.numberOfRows), holdingPosition: true)
         }
     }
 
@@ -290,7 +434,13 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
         guard let state else { return 24 }
         if row == 0 { return titleHeight }
         let block = state.blocks[row - 1]
-        return heights[block.id] ?? estimatedHeight(block)
+        if let known = heights[block.id] { return known }
+        // Measured here, the height is right before the row is ever laid out, so there is nothing to
+        // correct once it shows.
+        if !block.type.hasText || nearRows.contains(row) || canMeasureFarRow() { return measuredHeight(block) }
+        pendingRows.insert(row)
+        scheduleSettle()
+        return estimatedHeight(block)
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
