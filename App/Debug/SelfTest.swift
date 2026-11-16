@@ -356,6 +356,31 @@ enum SelfTest {
             snapshot("04-welcome")
         }
 
+        // A window left off every screen but for a corner is brought back; one that can be reached is left alone.
+        do {
+            let screen = NSRect(x: 0, y: 0, width: 1800, height: 1130)
+            let stranded = NSRect(x: -1760, y: -1098, width: 1800, height: 1130)
+            check(WindowRescue.rescued(stranded, screens: [screen]) == screen, "a window with only a corner on screen is moved back onto it")
+            check(WindowRescue.rescued(NSRect(x: 5_000, y: 300, width: 900, height: 600), screens: [screen])
+                    == NSRect(x: 450, y: 265, width: 900, height: 600), "a window on a screen that is gone is centred on the main one at its own size")
+            check(WindowRescue.rescued(NSRect(x: 1_500, y: -400, width: 900, height: 600), screens: [screen]) == nil,
+                  "a window parked mostly off the screen, still within reach, is left where it is")
+            check(WindowRescue.rescued(NSRect(x: 2_000, y: 100, width: 900, height: 600),
+                                       screens: [screen, NSRect(x: 1800, y: 0, width: 1440, height: 900)]) == nil,
+                  "a window on a second screen is left where it is")
+            if TestHost.isBackground {
+                log.append("skip moving the real window back on screen: a background run keeps it off screen; run FLOTION_FOREGROUND=1 Scripts/selftest.sh")
+            } else if let window = window() {
+                let home = window.frame
+                window.setFrameOrigin(NSPoint(x: -30_000, y: -30_000))
+                let wasStranded = WindowRescue.rescued(window.frame, screens: NSScreen.screens.map(\.visibleFrame)) != nil
+                WindowRescue.rescueWindows()
+                let back = WindowRescue.rescued(window.frame, screens: NSScreen.screens.map(\.visibleFrame)) == nil
+                check(wasStranded && back, "the real window, pushed off screen, comes back (stranded first: \(wasStranded), frame now \(window.frame))")
+                window.setFrame(home, display: true)
+            }
+        }
+
         if TestHost.focusTakenCount > 0 {
             log.append("note macOS made the background app active \(TestHost.focusTakenCount) time(s); it gave focus straight back")
         }

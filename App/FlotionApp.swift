@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG || SELFTEST
         TestHost.didFinishLaunching()
         #endif
+        WindowRescue.start()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
