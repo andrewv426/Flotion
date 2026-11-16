@@ -189,7 +189,21 @@ enum SelfTest {
                     try? png.write(to: output.appendingPathComponent("\(name).png"))
                 }
                 await webSnapshot("05-diagram-step1")
-                _ = try? await web.evaluateJavaScript("window.flotion.go(2)")
+                let sequence = try? await web.evaluateJavaScript("""
+                    (() => {
+                      const next = document.getElementById('next');
+                      const prev = document.getElementById('prev');
+                      const title = document.getElementById('cap-title');
+                      const seen = [];
+                      for (const button of [next, next, prev, prev, next, next]) {
+                        button.click();
+                        seen.push(window.flotion.index() + ':' + title.textContent);
+                      }
+                      return seen.join('|');
+                    })()
+                    """) as? String
+                check(sequence == "1:SYN-ACK|2:ACK|1:SYN-ACK|0:SYN|1:SYN-ACK|2:ACK",
+                      "rapid diagram clicks update the step and caption together, got \(String(describing: sequence))")
                 await pause(900)
                 let last = try? await web.evaluateJavaScript("[...document.querySelectorAll('.node')].map(n => n.dataset.tone + ':' + n.querySelector('.tag').textContent).join(' ')") as? String
                 check(last == "good:established good:established", "step 3 shows both ends established, got \(String(describing: last))")
