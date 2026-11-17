@@ -28,10 +28,11 @@ public struct AICommand: Sendable {
     }
 }
 
-/// Codex and Gemini CLI answer from the prompt and replayed text. Their sessions are never resumed by Flotion.
+/// Account-authenticated CLIs. Flotion replays its own history on every request.
 public struct AccountCLIProvider: AIProvider {
     public enum CLI: String, Sendable { case codex, gemini }
 
+    public let supportsWorkspaceTools = true
     public let cli: CLI
     public let executable: URL?
     let directory: URL
@@ -95,24 +96,60 @@ public struct AccountCLIProvider: AIProvider {
         return command(executable, arguments)
     }
 
-    func arguments(for request: AIRequest) -> [String] {
+    func arguments(for request: AIRequest) throws -> [String] {
         var args: [String]
         switch cli {
         case .codex:
             args = ["exec", "--json", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules",
                     "--sandbox", "read-only", "-c", "approval_policy=\"never\"", "-c", "forced_login_method=\"chatgpt\"",
-                    "-c", "cli_auth_credentials_store=\"auto\"", "-c", "web_search=\"disabled\"", "-c", "mcp_servers={}"]
+                    "-c", "cli_auth_credentials_store=\"auto\"", "-c", "web_search=\"disabled\"",
+                    "-c", try codexMCPConfig(request.tools)]
             for feature in ["shell_tool", "shell_snapshot", "view_image", "browser_use", "browser_use_external", "in_app_browser",
                             "apps", "plugins", "hooks", "multi_agent", "multi_agent_v2", "code_mode"] {
                 args += ["--disable", feature]
             }
         case .gemini:
             args = ["--output-format", "stream-json", "--skip-trust", "--approval-mode", "default",
-                    "--extensions", "none", "--allowed-mcp-server-names", "flotion-no-mcp"]
+                    "--extensions", "none", "--allowed-mcp-server-names"]
+            if case .flotion = request.tools { args.append("flotion") } else { args.append("flotion-no-mcp") }
         }
         if let model = request.model { args += ["--model", model] }
         if cli == .codex { args.append("-") }
         return args
+    }
+
+    private func codexMCPConfig(_ access: ToolAccess) throws -> String {
+        guard case .flotion(let server, let database, let actor) = access else { return "mcp_servers={}" }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .withoutEscapingSlashes
+        // These JSON strings are also TOML basic strings. Disabling slash escaping keeps paths valid in TOML.
+        func quote(_ string: String) throws -> String { String(decoding: try encoder.encode(string), as: UTF8.self) }
+        return """
+            mcp_servers={ flotion={ command=\(try quote(server.path)), required=true, default_tools_approval_mode="approve", env={ FLOTION_DB=\(try quote(database.path)), FLOTION_ACTOR=\(try quote(actor)) } } }
+            """
+    }
+
+    /// Gemini discovers MCP servers from project settings. A private per-turn directory
+    /// keeps the actor and database path out of the login profile and out of inline requests.
+    func geminiTurnDirectory(_ access: ToolAccess) throws -> URL? {
+        guard cli == .gemini, case .flotion(let server, let database, let actor) = access else { return nil }
+        let turn = FileManager.default.temporaryDirectory.appendingPathComponent("flotion-gemini-\(UUID())", isDirectory: true)
+        let settings = turn.appendingPathComponent(".gemini", isDirectory: true)
+        let config: [String: Any] = [
+            "mcpServers": ["flotion": ["command": server.path,
+                                      "env": ["FLOTION_DB": database.path, "FLOTION_ACTOR": actor]]],
+            "mcp": ["allowed": ["flotion"]],
+        ]
+        do {
+            try FileManager.default.createDirectory(at: turn, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            try FileManager.default.createDirectory(at: settings, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let data = try JSONSerialization.data(withJSONObject: config, options: .withoutEscapingSlashes)
+            try data.write(to: settings.appendingPathComponent("settings.json"), options: .atomic)
+            return turn
+        } catch {
+            try? FileManager.default.removeItem(at: turn)
+            throw error
+        }
     }
 
     public func run(_ request: AIRequest) -> AsyncStream<AIEvent> {
@@ -132,7 +169,9 @@ public struct AccountCLIProvider: AIProvider {
         guard !Task.isCancelled else { return .failed(.other, "Stopped.") }
         do {
             try prepareDirectory()
-            let command = command(executable, arguments(for: request))
+            let turnDirectory = try geminiTurnDirectory(request.tools)
+            defer { if let turnDirectory { try? FileManager.default.removeItem(at: turnDirectory) } }
+            let command = command(executable, try arguments(for: request), in: turnDirectory)
             let process = try AIProcess(executable: command.executable, arguments: command.arguments,
                                         workingDirectory: command.directory, environment: command.environment, includeStandardError: true)
             let lines = process.lines()
@@ -152,10 +191,10 @@ public struct AccountCLIProvider: AIProvider {
         }
     }
 
-    private func command(_ executable: URL, _ arguments: [String]) -> AICommand {
+    private func command(_ executable: URL, _ arguments: [String], in turnDirectory: URL? = nil) -> AICommand {
         var environment = AICommand.loginEnvironment(executable: executable)
         if cli == .gemini { environment["GEMINI_CLI_HOME"] = profile.path }
-        return AICommand(executable: executable, arguments: arguments, directory: directory, environment: environment)
+        return AICommand(executable: executable, arguments: arguments, directory: turnDirectory ?? directory, environment: environment)
     }
 
     private func prepareDirectory() throws {
@@ -164,16 +203,29 @@ public struct AccountCLIProvider: AIProvider {
         guard cli == .gemini else { return }
         try files.createDirectory(at: geminiSettings.deletingLastPathComponent(), withIntermediateDirectories: true,
                                   attributes: [.posixPermissions: 0o700])
-        guard !files.fileExists(atPath: geminiSettings.path) else { return }
-        let settings = """
-            {
-              "security": {"auth": {"enforcedType": "oauth-personal"}, "disableYoloMode": true},
-              "tools": {"core": []},
-              "hooksConfig": {"enabled": false},
-              "advanced": {"ignoreLocalEnv": true}
-            }
+        if !files.fileExists(atPath: geminiSettings.path) {
+            let settings = """
+                {
+                  "security": {"auth": {"enforcedType": "oauth-personal"}, "disableYoloMode": true},
+                  "tools": {"core": []},
+                  "hooksConfig": {"enabled": false},
+                  "advanced": {"ignoreLocalEnv": true}
+                }
+                """
+            try settings.write(to: geminiSettings, atomically: true, encoding: .utf8)
+        }
+        let policies = geminiSettings.deletingLastPathComponent().appendingPathComponent("policies", isDirectory: true)
+        try files.createDirectory(at: policies, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        // In Gemini's user-policy tier, this rule outranks the empty core allowlist.
+        // Managed administrator rules remain higher priority.
+        let policy = """
+            [[rule]]
+            toolName = "*"
+            mcpName = "flotion"
+            decision = "allow"
+            priority = 800
             """
-        try settings.write(to: geminiSettings, atomically: true, encoding: .utf8)
+        try policy.write(to: policies.appendingPathComponent("flotion.toml"), atomically: true, encoding: .utf8)
     }
 }
 
@@ -182,6 +234,8 @@ struct AccountCLIStream {
     let model: String
     private var text = ""
     private var failure: AIFailure?
+    private var activeTools = Set<String>()
+    private var usedTools = false
     private(set) var completed = false
 
     init(cli: AccountCLIProvider.CLI, model: String) {
@@ -198,10 +252,24 @@ struct AccountCLIStream {
         switch (cli, type) {
         case (.codex, "thread.started"), (.gemini, "init"):
             return [.started(sessionID: "", model: record["model"] as? String ?? model)]
-        case (.codex, "item.completed"):
-            guard let item = record["item"] as? [String: Any], item["type"] as? String == "agent_message",
+        case (.codex, "item.started"), (.codex, "item.completed"):
+            guard let item = record["item"] as? [String: Any] else { return [] }
+            if item["type"] as? String == "mcp_tool_call", item["server"] as? String == "flotion",
+               let id = item["id"] as? String, let name = item["tool"] as? String {
+                let start = startTool(id, name: name)
+                if type == "item.started" { return start }
+                return start + finishTool(id, isError: item["status"] as? String == "failed" || item["error"] is [String: Any])
+            }
+            guard type == "item.completed", item["type"] as? String == "agent_message",
                   let content = item["text"] as? String else { return [] }
             return append(content, separator: text.isEmpty ? "" : "\n\n")
+        case (.gemini, "tool_use"):
+            let prefix = "mcp_flotion_"
+            guard let id = record["tool_id"] as? String, let name = record["tool_name"] as? String, name.hasPrefix(prefix) else { return [] }
+            return startTool(id, name: String(name.dropFirst(prefix.count)))
+        case (.gemini, "tool_result"):
+            guard let id = record["tool_id"] as? String else { return [] }
+            return finishTool(id, isError: record["status"] as? String != "success")
         case (.gemini, "message"):
             guard record["role"] as? String == "assistant", let content = record["content"] as? String else { return [] }
             return append(content)
@@ -228,6 +296,17 @@ struct AccountCLIStream {
         return []
     }
 
+    private mutating func startTool(_ id: String, name: String) -> [AIEvent] {
+        guard activeTools.insert(id).inserted else { return [] }
+        usedTools = true
+        return [.toolStarted(id: id, name: name)]
+    }
+
+    private mutating func finishTool(_ id: String, isError: Bool) -> [AIEvent] {
+        guard activeTools.remove(id) != nil else { return [] }
+        return [.toolFinished(id: id, isError: isError)]
+    }
+
     private mutating func append(_ content: String, separator: String = "") -> [AIEvent] {
         guard !content.isEmpty else { return [] }
         let piece = separator + content
@@ -246,7 +325,7 @@ struct AccountCLIStream {
     }
 
     func result(label: String) -> AIResult {
-        if completed && failure == nil && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if completed && failure == nil && (usedTools || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
             return AIResult(text: text)
         }
         if failure == .notSignedIn { return .failed(.notSignedIn, "Sign in to \(label) again.") }

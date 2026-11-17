@@ -373,28 +373,6 @@ enum SelfTest {
                 check(model.editor?.blocks.count == before, "Undo on the reply removes its change from the page")
             }
 
-            if let openAI = AssistantModel.suggested.first(where: { $0.service == .openAI }) {
-                ai.setEnabled(false, for: openAI)
-                check(!ai.visibleModels.contains(openAI), "a hidden model is absent from the picker")
-                ai.setEnabled(true, for: openAI)
-                ai.selectModel(openAI.id)
-                let restored = AIController(workspace: ai.workspace)
-                check(restored.selectedModel == openAI && restored.visibleModels.contains(openAI), "model choice and visibility persist")
-                await model.sendChat("What did we just discuss?")
-                await waitFor { !ai.chat.isRunning && ai.chat.messages.count == 4 }
-                let followUp = ai.chat.messages.last
-                check(followUp?.text == "An answer from the selected model." && followUp?.modelLabel == openAI.label,
-                      "the follow-up uses the selected provider in the same chat")
-                check(followUp?.tools.isEmpty == true && followUp?.changeCount == 0, "a text provider cannot change the workspace")
-                await pause(150)
-                snapshot("08b-assistant-model-switch")
-                ai.setEnabled(false, for: openAI)
-                check(ai.selectedModel == .claudeDefault && !ai.visibleModels.contains(openAI),
-                      "hiding the active model selects an available model")
-            } else {
-                check(false, "the ChatGPT model is available in Settings")
-            }
-
             // Edit with AI on a selection.
             func findTextView(_ view: NSView?, containing text: String) -> BlockTextView? {
                 guard let view else { return nil }
@@ -605,6 +583,46 @@ enum SelfTest {
         } else {
             check(true, "a test run does not restore or save the window")
         }
+        // Run the follow-up edit checks after the focus-sensitive editor interactions.
+        if let ai = model.ai, let smokeID = model.pages.first(where: { $0.title == "Smoke test" })?.id {
+            await model.open(smokeID)
+            await pause(200)
+            let before = model.editor?.blocks.count ?? 0
+            let priorMessages = ai.chat.messages.count
+            let alternatives = AssistantModel.suggested.filter { $0.service != .claude }
+            check(alternatives.count == 2, "ChatGPT and Gemini are available in Settings")
+            for (index, alternative) in alternatives.enumerated() {
+                ai.setEnabled(false, for: alternative)
+                check(!ai.visibleModels.contains(alternative), "a hidden model is absent from the picker")
+                ai.setEnabled(true, for: alternative)
+                ai.selectModel(alternative.id)
+                let restored = AIController(workspace: ai.workspace)
+                check(restored.selectedModel == alternative && restored.visibleModels.contains(alternative), "model choice and visibility persist")
+                await model.sendChat("Add a follow-up summary to this page")
+                await waitFor { !ai.chat.isRunning && ai.chat.messages.count == priorMessages + (index + 1) * 2 }
+                await waitFor { (model.editor?.blocks.count ?? 0) == before + 1 }
+                let followUp = ai.chat.messages.last
+                check(followUp?.text == "Added a summary to the end of the page." && followUp?.modelLabel == alternative.label,
+                      "\(alternative.service.label) takes the follow-up in the same chat")
+                check(followUp?.tools.map(\.label) == ["Adding content"] && followUp?.changeCount == 1
+                      && model.editor?.blocks.count == before + 1, "\(alternative.service.label) edits the page and reports the change")
+                if alternative.service == .openAI {
+                    await pause(150)
+                    snapshot("08b-assistant-model-switch")
+                }
+                if let followUp {
+                    await ai.chat.undo(followUp.id)
+                    await waitFor { (model.editor?.blocks.count ?? 0) == before }
+                    check(model.editor?.blocks.count == before, "Undo reverts the \(alternative.service.label) edit")
+                }
+                ai.setEnabled(false, for: alternative)
+                check(ai.selectedModel == .claudeDefault && !ai.visibleModels.contains(alternative),
+                      "hiding the active model selects an available model")
+            }
+        } else {
+            check(false, "the smoke page is available for ChatGPT and Gemini")
+        }
+
         // Render the Settings window after the tests that use the editor's first responder.
         if let ai = model.ai, let chatGPT = AssistantModel.suggested.first(where: { $0.service == .openAI }) {
             ai.setEnabled(true, for: chatGPT)

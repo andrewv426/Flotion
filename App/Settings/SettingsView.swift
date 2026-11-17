@@ -16,6 +16,8 @@ struct SettingsView: View {
                 Section("Assistant models") {
                     Text("Choose which models appear in the Assistant picker. The selected provider receives recent chat turns and the open page when you send a message.")
                         .font(.callout).foregroundStyle(.secondary)
+                    Text("All providers can read and edit workspace pages from Assistant chat.")
+                        .font(.callout).foregroundStyle(.secondary)
                     Picker("Provider", selection: $service) {
                         ForEach(AssistantService.allCases) { item in Text(item.label).tag(item) }
                     }

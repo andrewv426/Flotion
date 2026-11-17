@@ -104,9 +104,9 @@ open .build/xcode/Build/Products/Debug/Flotion.app
 
 Use **Check again** in Settings after signing in.
 
-Press ⌘J and choose a model above the composer. Claude can read and edit the workspace. The other providers can answer questions about the open page and draft text. All providers can preview inline edits for you to apply.
+Press ⌘J and choose a model above the composer. All three providers can search, read and edit notes in Assistant chat through Flotion's workspace tools. The reply shows tool activity and offers **Undo** for its edits. **Edit with AI** produces a preview you can apply.
 
-After a model switch, the next message sends recent completed chat turns and the current page and selection to the selected provider. Long chats keep a bounded transcript for handoff, and long pages may be truncated for text providers. Start a new chat to send a request without the previous conversation.
+Flotion keeps the open chat in memory. After a model switch, your next message sends the selected provider up to 12 recent completed exchanges (about 16 KB of text), plus the current page and selection. A long page can be fetched with the workspace tools. **New Chat** or quitting Flotion clears the app's transcript. The workspace database keeps a separate change log for Undo. Claude Code and Gemini CLI may save their own local session files.
 
 ![The assistant panel after an edit](docs/images/assistant-panel.png)
 

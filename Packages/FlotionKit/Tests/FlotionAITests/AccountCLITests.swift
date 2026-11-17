@@ -24,6 +24,7 @@ import Testing
             [[ "$*" == *"--ignore-user-config"* && "$*" == *"--ignore-rules"* ]]
             [[ "$*" == *"--disable shell_tool"* && "$*" == *"--sandbox read-only"* ]]
             [[ "$*" == *'forced_login_method="chatgpt"'* && "$*" == *"--model selected-model -"* ]]
+            [[ "$*" == *'mcp_servers={}'* ]]
             [[ "$*" != *"Latest question"* && -z "${OPENAI_API_KEY:-}" ]]
             input="$(cat)"
             [[ "$input" == *"Latest question"* && "$input" == *"Previous answer"* ]]
@@ -58,6 +59,7 @@ import Testing
             [[ "$*" != *"Latest question"* && -z "${GEMINI_API_KEY:-}" ]]
             grep -Fq '"enforcedType": "oauth-personal"' "$GEMINI_CLI_HOME/.gemini/settings.json"
             grep -Fq '"core": []' "$GEMINI_CLI_HOME/.gemini/settings.json"
+            [[ "$*" == *"--allowed-mcp-server-names flotion-no-mcp"* && ! -f .gemini/settings.json ]]
             input="$(cat)"
             [[ "$input" == *"Latest question"* && "$input" == *"Previous answer"* ]]
             echo '{"type":"init","session_id":"private","model":"selected-model"}'
@@ -78,6 +80,71 @@ import Testing
         ])
     }
 
+    @Test func codexChatExposesOnlyTheFlotionServerAndReportsToolProgress() async throws {
+        let folder = try directory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let binary = try stub(in: folder, script: #"""
+            if [[ "$1 $2" == "login status" ]]; then
+                echo "Logged in using ChatGPT"
+                exit 0
+            fi
+            [[ "$*" == *'mcp_servers={ flotion={ command="/test/Flotion Test.app/flotion-mcp", required=true'* ]]
+            [[ "$*" == *'default_tools_approval_mode="approve"'* ]]
+            [[ "$*" == *'FLOTION_DB="/test/my workspace.sqlite", FLOTION_ACTOR="chat:turn-one"'* ]]
+            input="$(cat)"
+            [[ "$input" == *"Previous answer"* ]]
+            echo '{"type":"item.started","item":{"id":"other","type":"mcp_tool_call","server":"other","tool":"write","status":"in_progress"}}'
+            echo '{"type":"item.started","item":{"id":"read","type":"mcp_tool_call","server":"flotion","tool":"get_page","status":"in_progress"}}'
+            echo '{"type":"item.completed","item":{"id":"read","type":"mcp_tool_call","server":"flotion","tool":"get_page","status":"completed"}}'
+            echo '{"type":"item.completed","item":{"id":"edit","type":"mcp_tool_call","server":"flotion","tool":"update_block","status":"failed","error":{"message":"bad block"}}}'
+            echo '{"type":"item.completed","item":{"type":"agent_message","text":"The edit failed."}}'
+            echo '{"type":"turn.completed"}'
+            """#)
+        let provider = AccountCLIProvider(.codex, executable: binary, directory: folder)
+        #expect(await events(provider, request(tools: workspaceTools)) == [
+            .toolStarted(id: "read", name: "get_page"), .toolFinished(id: "read", isError: false),
+            .toolStarted(id: "edit", name: "update_block"), .toolFinished(id: "edit", isError: true),
+            .text("The edit failed."), .finished(AIResult(text: "The edit failed.")),
+        ])
+    }
+
+    @Test func geminiChatScopesConfigAndReadWriteEventsToTheFlotionServer() async throws {
+        let folder = try directory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let directoryRecord = folder.appendingPathComponent("turn-directory")
+        let binary = try stub(in: folder, script: #"""
+            [[ "$*" == *"--allowed-mcp-server-names flotion --model"* ]]
+            grep -Fq '"core": []' "$GEMINI_CLI_HOME/.gemini/settings.json"
+            grep -Fq 'toolName = "*"' "$GEMINI_CLI_HOME/.gemini/policies/flotion.toml"
+            grep -Fq 'mcpName = "flotion"' "$GEMINI_CLI_HOME/.gemini/policies/flotion.toml"
+            grep -Fq '"FLOTION_DB":"/test/my workspace.sqlite"' .gemini/settings.json
+            grep -Fq '"FLOTION_ACTOR":"chat:turn-one"' .gemini/settings.json
+            grep -Fq '"command":"/test/Flotion Test.app/flotion-mcp"' .gemini/settings.json
+            printf '%s' "$PWD" > '#PATH#'
+            input="$(cat)"
+            [[ "$input" == *"Previous answer"* ]]
+            echo '{"type":"tool_use","tool_name":"run_shell_command","tool_id":"shell"}'
+            echo '{"type":"tool_result","tool_id":"shell","status":"error"}'
+            echo '{"type":"tool_use","tool_name":"mcp_flotion_get_page","tool_id":"read"}'
+            echo '{"type":"tool_result","tool_id":"read","status":"success"}'
+            echo '{"type":"tool_use","tool_name":"mcp_flotion_update_block","tool_id":"edit"}'
+            echo '{"type":"tool_result","tool_id":"edit","status":"success"}'
+            echo '{"type":"result","status":"success"}'
+            """#.replacingOccurrences(of: "#PATH#", with: directoryRecord.path))
+        let provider = AccountCLIProvider(.gemini, executable: binary, directory: folder)
+        _ = try provider.signInCommand()
+        try Data().write(to: provider.geminiCredentials)
+        #expect(await events(provider, request(tools: workspaceTools)) == [
+            .toolStarted(id: "read", name: "get_page"), .toolFinished(id: "read", isError: false),
+            .toolStarted(id: "edit", name: "update_block"), .toolFinished(id: "edit", isError: false),
+            .finished(AIResult(text: "")),
+        ])
+        let turnDirectory = try String(contentsOf: directoryRecord, encoding: .utf8)
+        #expect(!FileManager.default.fileExists(atPath: turnDirectory))
+        let profile = try String(contentsOf: provider.geminiSettings, encoding: .utf8)
+        #expect(!profile.contains("FLOTION_DB"))
+    }
+
     @Test func terminalErrorsAndInterruptedStreamsFail() {
         var codex = AccountCLIStream(cli: .codex, model: "")
         _ = codex.consume(Data(#"{"type":"turn.failed","error":{"message":"401 Unauthorized"}}"#.utf8))
@@ -89,9 +156,14 @@ import Testing
         #expect(gemini.result(label: "Gemini").failure == .rateLimited)
     }
 
-    private func request() -> AIRequest {
+    private var workspaceTools: ToolAccess {
+        .flotion(server: URL(fileURLWithPath: "/test/Flotion Test.app/flotion-mcp"),
+                 database: URL(fileURLWithPath: "/test/my workspace.sqlite"), actor: "chat:turn-one")
+    }
+
+    private func request(tools: ToolAccess = .none) -> AIRequest {
         AIRequest(prompt: "Latest question", systemPrompt: "System instructions", model: "selected-model",
-                  history: [AIChatTurn(user: "Previous question", assistant: "Previous answer")])
+                  tools: tools, history: [AIChatTurn(user: "Previous question", assistant: "Previous answer")])
     }
 
     private func directory() throws -> URL {

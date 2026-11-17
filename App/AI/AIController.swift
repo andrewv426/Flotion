@@ -74,14 +74,12 @@ final class AIController {
         enabledIDs = visible.isEmpty ? [initial.id] : Set(visible.map(\.id))
         selectedModelID = initial.id
         let claude: any AIProvider = usesFakeProviders
-            ? Self.fakeClaude(workspace: workspace) : ClaudeCodeProvider(workingDirectory: scratch)
+            ? Self.fakeProvider(workspace: workspace, sessionID: "fake-session") : ClaudeCodeProvider(workingDirectory: scratch)
         chat = ChatSession(provider: claude, workspace: workspace, server: serverURL)
         providers[.claude] = claude
         for (service, cli) in [(AssistantService.openAI, AccountCLIProvider.CLI.codex), (.gemini, .gemini)] {
             providers[service] = usesFakeProviders
-                ? FakeProvider(supportsWorkspaceTools: false) { _ in
-                    [.finished(AIResult(text: "An answer from the selected model."))]
-                }
+                ? Self.fakeProvider(workspace: workspace, sessionID: nil)
                 : AccountCLIProvider(cli, directory: scratch)
         }
         selectCurrentProvider()
@@ -218,15 +216,14 @@ final class AIController {
         "claude mcp add flotion -- \"\(serverURL.path)\""
     }
 
-    /// Stands in for Claude in the self-test: a chat turn appends a block the way the model
-    /// would through the MCP tools, and an inline edit returns fixed text.
-    private static func fakeClaude(workspace: Workspace) -> FakeProvider {
+    /// Simulates an MCP edit in the self-test. A tool-free inline edit returns a preview.
+    private static func fakeProvider(workspace: Workspace, sessionID: String?) -> FakeProvider {
         FakeProvider { request in
             guard case .flotion(_, _, let actor) = request.tools else {
                 return [.started(sessionID: "", model: "fake"), .text("A shorter "), .text("**sentence**."),
                         .finished(AIResult(text: "A shorter **sentence**."))]
             }
-            var events: [AIEvent] = [.started(sessionID: "fake-session", model: "fake")]
+            var events: [AIEvent] = [.started(sessionID: sessionID ?? "", model: "fake")]
             if let range = request.prompt.range(of: "page_id: ") {
                 let pageID = String(request.prompt[range.upperBound...].prefix { $0 != ")" })
                 events.append(.toolStarted(id: "t1", name: "append_blocks"))
@@ -235,7 +232,7 @@ final class AIController {
                 events.append(.toolFinished(id: "t1", isError: false))
             }
             events += [.text("Added a summary "), .text("to the end of the page."),
-                       .finished(AIResult(text: "Added a summary to the end of the page.", sessionID: "fake-session"))]
+                       .finished(AIResult(text: "Added a summary to the end of the page.", sessionID: sessionID))]
             return events
         }
     }
