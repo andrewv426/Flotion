@@ -267,7 +267,7 @@ enum SelfTest {
                 let head = try? await web.evaluateJavaScript("document.querySelector('.edge').classList.contains('at-hi')") as? Bool
                 check(head == true, "the arrowhead is at the server end on the final ACK")
                 await webSnapshot("06-diagram-step3")
-                if let table = web.enclosingScrollView?.documentView as? EditorTableView,
+                if let scroll = web.enclosingScrollView, let table = scroll.documentView as? EditorTableView,
                    let controller = table.editor, let editor = model.editor,
                    let diagram = editor.blocks.last, let w = table.window {
                     let row = editor.blocks.count
@@ -275,6 +275,22 @@ enum SelfTest {
                     let webPoint = table.convert(NSPoint(x: web.bounds.midX, y: web.bounds.midY), from: web)
                     let hit = table.hitTest(table.convert(webPoint, to: table.superview))
                     check(hit === web || hit?.isDescendant(of: web) == true, "the interactive diagram receives clicks inside the player")
+                    let clip = scroll.contentView
+                    let original = clip.bounds.origin
+                    clip.scroll(to: NSPoint(x: 0, y: table.frame.height - clip.bounds.height))
+                    scroll.reflectScrolledClipView(clip)
+                    w.displayIfNeeded()
+                    let bottom = clip.bounds.minY
+                    if web.visibleRect.contains(NSPoint(x: web.bounds.midX, y: web.bounds.midY)),
+                       let wheel = TestHost.wheelEvent(over: web, deltaY: 40) {
+                        w.sendEvent(wheel)
+                        await waitFor(1) { clip.bounds.minY < bottom }
+                        check(clip.bounds.minY < bottom, "a wheel turn over the interactive diagram scrolls the page")
+                    } else {
+                        check(false, "the interactive diagram is visible for the wheel test")
+                    }
+                    clip.scroll(to: original)
+                    scroll.reflectScrolledClipView(clip)
                     if let click = NSEvent.mouseEvent(with: .leftMouseDown, location: table.convert(webPoint, to: nil),
                                                        modifierFlags: [.command, .shift], timestamp: 0, windowNumber: w.windowNumber,
                                                        context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
