@@ -34,6 +34,8 @@ enum Theme {
     static let minimumSideMargin: CGFloat = 64
     static let indentStep: CGFloat = 24
     static let markerWidth: CGFloat = 24
+    /// The least empty space below a page's last block (it grows to half the window).
+    static let minimumEndSpace: CGFloat = 160
 
     struct BlockStyle {
         var font: NSFont

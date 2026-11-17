@@ -286,3 +286,13 @@ final class StaticBlockCell: FlippedCell {
         if block.type == .pageLink, let target = block.props.targetPageID { controller?.onOpenPage?(target) }
     }
 }
+
+/// The empty space after the last block, so the last line can be scrolled up to a comfortable
+/// height and typed below. Clicking it puts the caret in an empty block at the end of the page.
+final class EndSpaceCell: FlippedCell {
+    weak var controller: EditorController?
+
+    override func mouseDown(with event: NSEvent) {
+        controller?.focusEnd()
+    }
+}

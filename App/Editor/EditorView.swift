@@ -110,12 +110,41 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = true
         scrollView.backgroundColor = Theme.page
-        scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 160, right: 0)
         // The slash menu is its own window, so it follows the "/" when the page scrolls.
         scrollView.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.slashMenu?.reposition() }
         }
+        // The space after the last block follows the window's height.
+        scrollView.contentView.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: scrollView.contentView, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.viewportChanged() }
+        }
+    }
+
+    // MARK: Space after the last block
+
+    /// The row after the last block: empty space that can be scrolled into view and clicked to type.
+    var endRow: Int { (state?.blocks.count ?? 0) + 1 }
+    private var lastEndSpace: CGFloat = 0
+
+    /// Half the visible height, so the last line can sit mid-window while typing, as in Notion.
+    /// (A scroll-view content inset would do the same, but AppKit replaces it with its own
+    /// automatic insets under the toolbar, so the space is a real row instead.)
+    var endSpaceHeight: CGFloat { max(Theme.minimumEndSpace, (scrollView.contentView.bounds.height / 2).rounded()) }
+
+    private func viewportChanged() {
+        let height = endSpaceHeight
+        guard abs(height - lastEndSpace) > 0.5, state != nil else { return }
+        lastEndSpace = height
+        staleRows.insert(endRow)
+        flushHeights()
+    }
+
+    /// Clicked below the last block.
+    func focusEnd() {
+        clearSelection()
+        state?.focusEnd()
     }
 
     // MARK: Binding
@@ -284,11 +313,16 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
 
     // MARK: Table data source and delegate
 
-    func numberOfRows(in tableView: NSTableView) -> Int { (state?.blocks.count ?? 0) + (state == nil ? 0 : 1) }
+    /// The title, the blocks, then the space after the last block.
+    func numberOfRows(in tableView: NSTableView) -> Int { state.map { $0.blocks.count + 2 } ?? 0 }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         guard let state else { return 24 }
         if row == 0 { return titleHeight }
+        if row == endRow {
+            lastEndSpace = endSpaceHeight
+            return lastEndSpace
+        }
         let block = state.blocks[row - 1]
         return heights[block.id] ?? estimatedHeight(block)
     }
@@ -298,6 +332,11 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
         if row == 0 {
             let cell: TitleCell = dequeue("title")
             cell.configure(title: title, controller: self)
+            return cell
+        }
+        if row == endRow {
+            let cell: EndSpaceCell = dequeue("end")
+            cell.controller = self
             return cell
         }
         let block = state.blocks[row - 1]
@@ -328,7 +367,7 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
 
     // Drag a row by the margin beside it to reorder.
     func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
-        guard row > 0 else { return nil }
+        guard row > 0, row < endRow else { return nil }
         let item = NSPasteboardItem()
         item.setString(String(row), forType: Self.dragType)
         return item
@@ -336,7 +375,8 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
 
     func tableView(_ tableView: NSTableView, validateDrop info: any NSDraggingInfo, proposedRow row: Int,
                    proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
-        dropOperation == .above && row >= 1 ? .move : []
+        // Dropping above the end space moves the block to the end of the page.
+        dropOperation == .above && (1...endRow).contains(row) ? .move : []
     }
 
     func tableView(_ tableView: NSTableView, acceptDrop info: any NSDraggingInfo, row: Int,
