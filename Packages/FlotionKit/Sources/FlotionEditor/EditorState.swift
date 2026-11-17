@@ -350,12 +350,12 @@ public final class EditorState {
         onChange?(.structure)
     }
 
-    /// The block the caret should move to with the up / down arrow keys.
-    public func neighbour(of id: String, direction: Int) -> String? {
+    /// The next block in a direction that can take the requested kind of focus.
+    public func neighbour(of id: String, direction: Int, where canFocus: (BlockType) -> Bool = { $0.hasText }) -> String? {
         guard var i = index(of: id) else { return nil }
         i += direction
         while blocks.indices.contains(i) {
-            if blocks[i].type.hasText { return blocks[i].id }
+            if canFocus(blocks[i].type) { return blocks[i].id }
             i += direction
         }
         return nil

@@ -43,6 +43,7 @@ struct EditorView: NSViewRepresentable {
 
 final class EditorTableView: NSTableView {
     var onWidthChange: (() -> Void)?
+    weak var editor: EditorController?
     private var lastWidth: CGFloat = 0
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -52,6 +53,35 @@ final class EditorTableView: NSTableView {
             onWidthChange?()
         }
     }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let hit = super.hitTest(point) else { return nil }
+        let location = convert(point, from: superview)
+        let index = row(at: location)
+        guard index > 0,
+              let cell = view(atColumn: 0, row: index, makeIfNecessary: false) as? DiagramBlockCell else { return hit }
+        let localPoint = cell.convert(location, from: self)
+        guard cell.containsBlock(at: localPoint) else { return hit }
+        if !cell.actionsButton.isHidden, cell.actionsButton.frame.contains(localPoint) {
+            return cell.actionsButton
+        }
+        let event = NSApp.currentEvent
+        let modifiers = event?.modifierFlags ?? []
+        if modifiers.contains([.command, .shift]) || modifiers.contains(.control) || event?.type == .rightMouseDown {
+            return cell
+        }
+        return cell.interactiveHit(at: localPoint) ?? cell
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if editor?.handleDiagramKey(event) != true { super.keyDown(with: event) }
+    }
+
+    override func resignFirstResponder() -> Bool {
+        guard super.resignFirstResponder() else { return false }
+        editor?.clearDiagramSelection()
+        return true
+    }
 }
 
 @MainActor
@@ -59,6 +89,7 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
     let scrollView = NSScrollView()
     let table = EditorTableView()
     private(set) var state: EditorState?
+    private(set) var selectedDiagramID: String?
     private var title = ""
     var generation = -1
 
@@ -103,6 +134,7 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
         table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         table.dataSource = self
         table.delegate = self
+        table.editor = self
         table.registerForDraggedTypes([Self.dragType])
         table.setDraggingSourceOperationMask(.move, forLocal: true)
         table.onWidthChange = { [weak self] in self?.widthChanged() }
@@ -123,6 +155,7 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
     func show(_ state: EditorState, title: String) {
         let interval = signposter.beginInterval("showPage")
         closeSlashMenu()
+        clearDiagramSelection()
         self.state?.onChange = nil
         self.state = state
         self.title = title
@@ -150,8 +183,10 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
         case .structure:
             clearSelection()
             closeSlashMenu()
+            if let id = selectedDiagramID, !isDiagramBlock(id) { clearDiagramSelection() }
             table.reloadData()
         case .rows(let indexes):
+            if let id = selectedDiagramID, !isDiagramBlock(id) { clearDiagramSelection() }
             for i in indexes where state.blocks.indices.contains(i) {
                 let row = i + 1
                 heights[state.blocks[i].id] = nil
@@ -190,6 +225,104 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
     }
 
     func toggleChecked(_ id: String) { state?.toggleChecked(id) }
+
+    // MARK: Diagram selection
+
+    private func isDiagramBlock(_ id: String) -> Bool {
+        guard let state, let i = state.index(of: id) else { return false }
+        return state.blocks[i].type == .diagram
+    }
+
+    private func setDiagramSelection(_ id: String?) {
+        let previous = selectedDiagramID
+        guard id != previous else { return }
+        selectedDiagramID = id
+        for blockID in [previous, id].compactMap({ $0 }) {
+            guard let i = state?.index(of: blockID),
+                  let cell = table.view(atColumn: 0, row: i + 1, makeIfNecessary: false) as? DiagramBlockCell else { continue }
+            cell.isBlockSelected = blockID == id
+        }
+    }
+
+    func selectDiagram(_ id: String) -> Bool {
+        guard let state, isDiagramBlock(id),
+              table.window?.makeFirstResponder(table) == true else { return false }
+        clearSelection()
+        closeSlashMenu()
+        state.focus = nil
+        setDiagramSelection(id)
+        return true
+    }
+
+    func clearDiagramSelection() { setDiagramSelection(nil) }
+
+    func diagramMenu(for id: String) -> NSMenu? {
+        guard selectDiagram(id) else { return nil }
+        let menu = NSMenu()
+        let delete = NSMenuItem(title: "Delete Diagram", action: #selector(deleteDiagramFromMenu(_:)), keyEquivalent: "")
+        delete.target = self
+        delete.representedObject = id
+        menu.addItem(delete)
+        return menu
+    }
+
+    @objc private func deleteDiagramFromMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        deleteDiagram(id)
+    }
+
+    private func deleteDiagram(_ id: String) {
+        guard isDiagramBlock(id) else { return }
+        clearDiagramSelection()
+        state?.delete(id)
+    }
+
+    func handleDiagramKey(_ event: NSEvent) -> Bool {
+        guard let id = selectedDiagramID, let state,
+              event.modifierFlags.intersection([.command, .option, .shift, .control]).isEmpty else { return false }
+        switch event.specialKey {
+        case .backspace, .delete, .deleteForward:
+            deleteDiagram(id)
+        case .upArrow:
+            moveFromBlock(id, direction: -1)
+        case .downArrow:
+            moveFromBlock(id, direction: 1)
+        case _ where event.charactersIgnoringModifiers == "\u{1B}":
+            clearDiagramSelection()
+            if let next = state.neighbour(of: id, direction: -1) {
+                focusBlock(next, direction: -1)
+            } else if let next = state.neighbour(of: id, direction: 1) {
+                focusBlock(next, direction: 1)
+            } else {
+                focusTitle()
+            }
+        default:
+            return false
+        }
+        return true
+    }
+
+    @discardableResult
+    private func moveFromBlock(_ id: String, direction: Int) -> Bool {
+        if let next = state?.neighbour(of: id, direction: direction, where: { $0.hasText || $0 == .diagram }) {
+            focusBlock(next, direction: direction)
+        } else if direction < 0 {
+            focusTitle()
+        } else {
+            return false
+        }
+        return true
+    }
+
+    private func focusBlock(_ id: String, direction: Int) {
+        guard let state, let i = state.index(of: id) else { return }
+        if state.blocks[i].type == .diagram {
+            if selectDiagram(id) { table.scrollRowToVisible(i + 1) }
+        } else {
+            state.focus = Focus(blockID: id, offset: direction < 0 ? state.blocks[i].runs.utf16Count : 0)
+            applyFocus()
+        }
+    }
 
     /// A diagram's content or height changed: refresh its rows in place.
     func reloadDiagrams() {
@@ -284,6 +417,11 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
 
     // MARK: Table data source and delegate
 
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        clearDiagramSelection()
+        return true
+    }
+
     func numberOfRows(in tableView: NSTableView) -> Int { (state?.blocks.count ?? 0) + (state == nil ? 0 : 1) }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
@@ -320,7 +458,7 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
         if let cell = view as? TextBlockCell {
             cell.configure(block, number: block.type == .numbered ? (state?.listNumber(at: index) ?? 1) : 0, controller: self)
         } else if let cell = view as? DiagramBlockCell {
-            cell.configure(block, diagram: block.props.diagramID.flatMap(diagram))
+            cell.configure(block, diagram: block.props.diagramID.flatMap(diagram), controller: self)
         } else if let cell = view as? StaticBlockCell {
             cell.configure(block, title: block.type == .pageLink ? titleOfPage(block.props.targetPageID ?? "") : "", controller: self)
         }
@@ -395,6 +533,11 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
         let range = tv.selectedRange()
 
         if tv.isTitle {
+            if selector == #selector(NSResponder.moveDown(_:)),
+               let first = state.blocks.first(where: { $0.type.hasText || $0.type == .diagram }) {
+                focusBlock(first.id, direction: 1)
+                return true
+            }
             if selector == #selector(NSResponder.insertNewline(_:)) || selector == #selector(NSResponder.moveDown(_:)) || selector == #selector(NSResponder.insertTab(_:)) {
                 if let first = state.blocks.first(where: { $0.type.hasText }) {
                     state.focus = Focus(blockID: first.id, offset: 0)
@@ -430,18 +573,10 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
             return true
         case #selector(NSResponder.moveUp(_:)):
             guard tv.caretIsOnEdgeLine(first: true) else { return false }
-            if let previous = state.neighbour(of: id, direction: -1), let i = state.index(of: previous) {
-                state.focus = Focus(blockID: previous, offset: state.blocks[i].runs.utf16Count)
-                applyFocus()
-            } else {
-                focusTitle()
-            }
-            return true
+            return moveFromBlock(id, direction: -1)
         case #selector(NSResponder.moveDown(_:)):
-            guard tv.caretIsOnEdgeLine(first: false), let next = state.neighbour(of: id, direction: 1) else { return false }
-            state.focus = Focus(blockID: next, offset: 0)
-            applyFocus()
-            return true
+            guard tv.caretIsOnEdgeLine(first: false) else { return false }
+            return moveFromBlock(id, direction: 1)
         default:
             return false
         }

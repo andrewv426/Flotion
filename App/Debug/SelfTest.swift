@@ -42,6 +42,13 @@ enum SelfTest {
             tv.insertText(text, replacementRange: tv.selectedRange())
         }
         func key(_ selector: Selector) { responder()?.doCommand(by: selector) }
+        func pressDiagramKey(_ character: String, code: UInt16, in table: EditorTableView) {
+            guard let w = table.window,
+                  let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                               windowNumber: w.windowNumber, context: nil, characters: character,
+                                               charactersIgnoringModifiers: character, isARepeat: false, keyCode: code) else { return }
+            table.keyDown(with: event)
+        }
         func snapshot(_ name: String) {
             guard let view = window()?.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
                 failures.append("no window to snapshot for \(name)")
@@ -196,10 +203,77 @@ enum SelfTest {
                 let head = try? await web.evaluateJavaScript("document.querySelector('.edge').classList.contains('at-hi')") as? Bool
                 check(head == true, "the arrowhead is at the server end on the final ACK")
                 await webSnapshot("06-diagram-step3")
+                if let table = web.enclosingScrollView?.documentView as? EditorTableView,
+                   let controller = table.editor, let editor = model.editor,
+                   let diagram = editor.blocks.last, let w = table.window {
+                    let row = editor.blocks.count
+                    let previous = table.view(atColumn: 0, row: row - 1, makeIfNecessary: true) as? TextBlockCell
+                    let webPoint = table.convert(NSPoint(x: web.bounds.midX, y: web.bounds.midY), from: web)
+                    let hit = table.hitTest(table.convert(webPoint, to: table.superview))
+                    check(hit === web || hit?.isDescendant(of: web) == true, "the interactive diagram receives clicks inside the player")
+                    if let tv = previous?.blockTextView {
+                        w.makeFirstResponder(tv)
+                        tv.setSelectedRange(NSRange(location: (tv.string as NSString).length, length: 0))
+                        key(#selector(NSResponder.moveDown(_:)))
+                    }
+                    check(controller.selectedDiagramID == diagram.id && w.firstResponder === table,
+                          "Down from text selects the whole diagram")
+                    pressDiagramKey("\u{1B}", code: 53, in: table)
+                    check(controller.selectedDiagramID == nil && responder() === previous?.blockTextView,
+                          "Escape clears the diagram selection and returns to text")
+                } else {
+                    check(false, "the player is hosted in the editor table")
+                }
             } else {
                 check(false, "a web view exists for the visible diagram block")
             }
             snapshot("07-page-with-diagram")
+
+            let drawing = try? workspace.createDiagram(pageID: pageID, title: "Static flow", format: .flow, source: """
+                flow right
+                first: Draft
+                next: Review
+                first -> next
+                """,
+                context: ChangeContext(actor: "selftest"))
+            if let (_, block) = drawing, let w = window() {
+                await waitFor { model.editor?.blocks.last?.id == block.id }
+                if let editor = model.editor, let table = findWebView(w.contentView)?.enclosingScrollView?.documentView as? EditorTableView,
+                   let controller = table.editor, let i = editor.index(of: block.id) {
+                    let row = i + 1
+                    table.scrollRowToVisible(row)
+                    table.layoutSubtreeIfNeeded()
+                    let rect = table.rect(ofRow: row)
+                    let point = NSPoint(x: rect.midX, y: rect.midY)
+                    let cell = table.hitTest(table.convert(point, to: table.superview)) as? DiagramBlockCell
+                    check(cell != nil, "a click on a static diagram targets block selection")
+                    if let click = NSEvent.mouseEvent(with: .leftMouseDown, location: table.convert(point, to: nil),
+                                                       modifierFlags: [], timestamp: 0, windowNumber: w.windowNumber,
+                                                       context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                        cell?.mouseDown(with: click)
+                    }
+                    check(controller.selectedDiagramID == block.id && cell?.isBlockSelected == true && cell?.actionsButton.isHidden == false,
+                          "clicking the drawing selects it, highlights it and reveals its actions")
+                    snapshot("07-diagram-selected")
+                    pressDiagramKey("\u{7F}", code: 51, in: table)
+                    check(controller.selectedDiagramID == nil && editor.index(of: block.id) == nil,
+                          "Delete removes the selected final diagram")
+                    await waitFor { (try? workspace.block(id: block.id)) == nil }
+                    check((try? workspace.block(id: block.id)) == nil, "diagram deletion is saved")
+                    editor.undo()
+                    await waitFor { (try? workspace.block(id: block.id)) != nil }
+                    check(editor.blocks.last?.id == block.id && (try? workspace.block(id: block.id))?.id == block.id,
+                          "undo restores the same diagram to the page and database")
+                    if let item = controller.diagramMenu(for: block.id)?.item(at: 0), let action = item.action {
+                        NSApp.sendAction(action, to: item.target, from: item)
+                    }
+                    check(editor.index(of: block.id) == nil, "the diagram actions menu deletes the diagram")
+                } else {
+                    check(false, "the static diagram is available for selection")
+                }
+            } else {
+                check(false, "a static diagram can be created for the selection test")
+            }
         }
 
         // The assistant (a scripted provider stands in for Claude; see AIController.fakeProvider).
