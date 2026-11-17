@@ -388,18 +388,11 @@ enum SelfTest {
                 check(followUp?.tools.isEmpty == true && followUp?.changeCount == 0, "a text provider cannot change the workspace")
                 await pause(150)
                 snapshot("08b-assistant-model-switch")
-                let settingsWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 580),
-                                              styleMask: [.borderless], backing: .buffered, defer: false)
-                let settings = NSHostingView(rootView: SettingsView(model: model))
-                settingsWindow.contentView = settings
-                settings.layoutSubtreeIfNeeded()
-                await pause(150)
-                snapshot("08c-assistant-model-settings", view: settings)
                 ai.setEnabled(false, for: openAI)
                 check(ai.selectedModel == .claudeDefault && !ai.visibleModels.contains(openAI),
                       "hiding the active model selects an available model")
             } else {
-                check(false, "the OpenAI model is available in Settings")
+                check(false, "the ChatGPT model is available in Settings")
             }
 
             // Edit with AI on a selection.
@@ -411,6 +404,7 @@ enum SelfTest {
             }
             if let tv = findTextView(window()?.contentView, containing: "Last line"), let controller = tv.controller {
                 window()?.makeFirstResponder(tv)
+                tv.setSelectedRange(NSRange(location: 0, length: 0))
                 tv.setSelectedRange(NSRange(location: 0, length: 4))
                 await waitFor(2) { model.selection != nil }
                 check(model.selection?.text == "Last", "selecting text is tracked for the assistant (first responder is the block: \(window()?.firstResponder === tv), responder: \(String(describing: window()?.firstResponder).prefix(60)), delegate set: \(tv.delegate != nil), controller selection: \(String(describing: controller.currentSelection?.text)))")
@@ -611,6 +605,20 @@ enum SelfTest {
         } else {
             check(true, "a test run does not restore or save the window")
         }
+        // Render the Settings window after the tests that use the editor's first responder.
+        if let ai = model.ai, let chatGPT = AssistantModel.suggested.first(where: { $0.service == .openAI }) {
+            ai.setEnabled(true, for: chatGPT)
+            ai.selectModel(chatGPT.id)
+            let settingsWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 580),
+                                          styleMask: [.borderless], backing: .buffered, defer: false)
+            let settings = NSHostingView(rootView: SettingsView(model: model))
+            settingsWindow.contentView = settings
+            settings.layoutSubtreeIfNeeded()
+            await pause(150)
+            snapshot("08c-assistant-model-settings", view: settings)
+            ai.setEnabled(false, for: chatGPT)
+        }
+
         if TestHost.focusTakenCount > 0 {
             log.append("note macOS made the background app active \(TestHost.focusTakenCount) time(s); it gave focus straight back")
         }

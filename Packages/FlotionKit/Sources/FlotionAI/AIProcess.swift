@@ -11,14 +11,15 @@ final class AIProcess: @unchecked Sendable {
     private var ended = false
     private var sink: (@Sendable (Data?) -> Void)?
 
-    init(executable: URL, arguments: [String], workingDirectory: URL, environment: [String: String]) throws {
+    init(executable: URL, arguments: [String], workingDirectory: URL, environment: [String: String],
+         includeStandardError: Bool = false) throws {
         process.executableURL = executable
         process.arguments = arguments
         process.currentDirectoryURL = workingDirectory
         process.environment = environment
         process.standardInput = input
         process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
+        process.standardError = includeStandardError ? output : FileHandle.nullDevice
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
             self?.ingest(handle.availableData)
         }
@@ -56,6 +57,15 @@ final class AIProcess: @unchecked Sendable {
         backlog.forEach(sink)
         backlog.removeAll()
         if ended { sink(nil) }
+    }
+
+    func lines() -> AsyncStream<Data> {
+        AsyncStream { continuation in
+            continuation.onTermination = { [weak self] _ in self?.terminate() }
+            attach { data in
+                if let data { continuation.yield(data) } else { continuation.finish() }
+            }
+        }
     }
 
     func send(_ data: Data) {

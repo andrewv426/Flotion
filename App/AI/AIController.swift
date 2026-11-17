@@ -2,7 +2,6 @@ import AppKit
 import FlotionAI
 import FlotionCore
 import Observation
-import Security
 
 /// The text the user has selected in the editor, kept so the AI can act on it.
 struct EditorSelection: Equatable {
@@ -19,7 +18,8 @@ final class AIController {
     @ObservationIgnored let serverURL: URL
     @ObservationIgnored private let usesFakeProviders: Bool
     @ObservationIgnored private var providers: [AssistantService: any AIProvider] = [:]
-    private var apiKeys: [AssistantService: String] = [:]
+    @ObservationIgnored private let scratch: URL
+    @ObservationIgnored private var statusRefresh = UUID()
 
     private(set) var statuses: [AssistantService: AIProviderStatus] = [:]
     private(set) var enabledIDs: Set<String>
@@ -44,12 +44,11 @@ final class AIController {
     }
 
     var provider: any AIProvider { providers[selectedModel.service]! }
-    var claudePath: String? { (providers[.claude] as? ClaudeCodeProvider)?.executable?.path }
 
     init(workspace: Workspace) {
         self.workspace = workspace
         serverURL = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/flotion-mcp")
-        let scratch = workspace.url.deletingLastPathComponent().appendingPathComponent("ai-workdir", isDirectory: true)
+        scratch = workspace.url.deletingLastPathComponent().appendingPathComponent("ai-workdir", isDirectory: true)
         #if DEBUG || SELFTEST
         usesFakeProviders = ProcessInfo.processInfo.environment["FLOTION_FAKE_AI"] == "1"
         #else
@@ -78,24 +77,43 @@ final class AIController {
             ? Self.fakeClaude(workspace: workspace) : ClaudeCodeProvider(workingDirectory: scratch)
         chat = ChatSession(provider: claude, workspace: workspace, server: serverURL)
         providers[.claude] = claude
-        for service in AssistantService.allCases where service != .claude {
-            if !usesFakeProviders { apiKeys[service] = AssistantKeychain.read(service) }
-            configureService(service)
+        for (service, cli) in [(AssistantService.openAI, AccountCLIProvider.CLI.codex), (.gemini, .gemini)] {
+            providers[service] = usesFakeProviders
+                ? FakeProvider(supportsWorkspaceTools: false) { _ in
+                    [.finished(AIResult(text: "An answer from the selected model."))]
+                }
+                : AccountCLIProvider(cli, directory: scratch)
         }
         selectCurrentProvider()
         persistModels()
     }
 
     func refreshStatus() async {
-        if !usesFakeProviders {
-            // Cursor can be installed after the app starts.
-            let executable = CursorProvider.locate()
-            if (providers[.cursor] as? CursorProvider)?.executable != executable, !chat.isRunning {
-                configureService(.cursor, cursorExecutable: executable)
-                if selectedModel.service == .cursor { selectCurrentProvider() }
+        if !usesFakeProviders && !chat.isRunning {
+            let claude = ClaudeCLI.locate()
+            if (providers[.claude] as? ClaudeCodeProvider)?.executable != claude {
+                providers[.claude] = ClaudeCodeProvider(executable: claude, workingDirectory: scratch)
+                if selectedModel.service == .claude { selectCurrentProvider() }
+            }
+            for (service, cli) in [(AssistantService.openAI, AccountCLIProvider.CLI.codex), (.gemini, .gemini)] {
+                if (providers[service] as? AccountCLIProvider)?.executable != AccountCLIProvider.locate(cli) {
+                    providers[service] = AccountCLIProvider(cli, directory: scratch)
+                    if selectedModel.service == service { selectCurrentProvider() }
+                }
             }
         }
-        if let claude = providers[.claude] { statuses[.claude] = await claude.status() }
+        let refresh = UUID()
+        statusRefresh = refresh
+        let updated = await withTaskGroup(of: (AssistantService, AIProviderStatus).self) { group in
+            for (service, provider) in providers {
+                group.addTask { (service, await provider.status()) }
+            }
+            var values: [AssistantService: AIProviderStatus] = [:]
+            for await (service, status) in group { values[service] = status }
+            return values
+        }
+        guard refresh == statusRefresh, !Task.isCancelled else { return }
+        statuses = updated
         prewarm()
     }
 
@@ -152,45 +170,6 @@ final class AIController {
         if isPanelOpen, isReady { chat.prewarm() }
     }
 
-    func hasAPIKey(_ service: AssistantService) -> Bool {
-        apiKeys[service] != nil
-    }
-
-    func saveAPIKey(_ input: String?, for service: AssistantService) -> String? {
-        guard !usesFakeProviders, !chat.isRunning, service != .claude else { return "The connection cannot be changed right now." }
-        let key = input?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let key, key.isEmpty || key.rangeOfCharacter(from: .whitespacesAndNewlines.union(.controlCharacters)) != nil {
-            return "Enter an API key without spaces."
-        }
-        let status = AssistantKeychain.write(key, for: service)
-        guard status == errSecSuccess else { return "Could not update the API key in Keychain (\(status))." }
-        apiKeys[service] = key
-        configureService(service)
-        if selectedModel.service == service { selectCurrentProvider() }
-        return nil
-    }
-
-    private func configureService(_ service: AssistantService, cursorExecutable: URL? = CursorProvider.locate()) {
-        if usesFakeProviders {
-            providers[service] = FakeProvider(supportsWorkspaceTools: false) { _ in
-                [.finished(AIResult(text: "An answer from the selected model."))]
-            }
-            statuses[service] = .ready(plan: "test")
-            return
-        }
-        let key = apiKeys[service]
-        statuses[service] = key == nil ? .signedOut : .ready(plan: nil)
-        switch service {
-        case .openAI: providers[service] = ChatCompletionsProvider(service: .openAI, apiKey: key)
-        case .gemini: providers[service] = ChatCompletionsProvider(service: .gemini, apiKey: key)
-        case .grok: providers[service] = ChatCompletionsProvider(service: .grok, apiKey: key)
-        case .cursor:
-            providers[service] = CursorProvider(executable: cursorExecutable, apiKey: key)
-            if cursorExecutable == nil { statuses[service] = .notInstalled }
-        case .claude: break
-        }
-    }
-
     func newChat() {
         chat.clear()
         prewarm()
@@ -203,14 +182,31 @@ final class AIController {
                          effort: "low", tools: .none, keepSession: false)
     }
 
-    /// Sign-in is Claude Code's own flow, run in Terminal. Flotion never handles a credential.
-    func openSignIn() {
-        guard let claudePath else { return }
-        let script = workspace.url.deletingLastPathComponent().appendingPathComponent("Sign in to Claude.command")
-        let body = "#!/bin/zsh\n\"\(claudePath)\" auth login\necho\necho \"Done. You can close this window and return to Flotion.\"\n"
+    /// Terminal runs the CLI's interactive browser sign-in. Flotion handles no credentials.
+    func openSignIn(_ service: AssistantService) {
         do {
+            let command: AICommand?
+            if let executable = (providers[service] as? ClaudeCodeProvider)?.executable {
+                command = AICommand(executable: executable, arguments: ["auth", "login"], directory: scratch,
+                                    environment: AICommand.loginEnvironment(executable: executable))
+            } else {
+                command = try (providers[service] as? AccountCLIProvider)?.signInCommand()
+            }
+            guard let command else { return }
+            let script = scratch.appendingPathComponent("Sign in to \(service.label).command")
+            func quote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+            let environment = command.environment.sorted(by: { $0.key < $1.key }).map { quote("\($0.key)=\($0.value)") }
+            let invocation = (["/usr/bin/env", "-i"] + environment + [quote(command.executable.path)] + command.arguments.map(quote))
+                .joined(separator: " ")
+            let body = """
+                #!/bin/zsh
+                cd -- \(quote(command.directory.path)) || exit 1
+                \(invocation)
+                echo
+                echo "Return to Flotion and click Check again after signing in."
+                """
             try body.write(to: script, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
             NSWorkspace.shared.open(script)
         } catch {
             NSSound.beep()

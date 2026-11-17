@@ -221,19 +221,15 @@ struct ConnectCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             let service = ai.selectedModel.service
-            Text(status == .notInstalled ? "Install \(service == .claude ? "Claude Code" : "Cursor CLI")" : "Connect \(service.label)")
+            Text(status == .notInstalled ? "Install \(service.cliName)" : "Connect \(service.label)")
                 .font(.system(size: 13, weight: .semibold))
             HStack {
-                if status == .notInstalled, let url = service.installURL {
-                    Link("Installation guide", destination: url)
-                } else if service == .claude {
-                    Button("Sign in…") { ai.openSignIn() }
+                if status == .notInstalled {
+                    Link("Installation guide", destination: service.installURL)
                 } else {
-                    SettingsLink { Text("Add API key in Settings") }
+                    Button("Sign in…") { ai.openSignIn(service) }
                 }
-                if service.installURL != nil {
-                    Button("Check again") { Task { await ai.refreshStatus() } }
-                }
+                Button("Check again") { Task { await ai.refreshStatus() } }
             }
             .font(.system(size: 12))
         }

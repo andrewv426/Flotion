@@ -6,7 +6,7 @@ A minimal, native notes app for macOS in the style of Notion, built so that LLMs
 - **Native and fast.** SwiftUI and AppKit, no web runtime for the editor. A 5,000-block page opens in under 30 ms.
 - **MCP built in.** A bundled server lets Claude Code, Claude Desktop or any MCP client search, read and edit the workspace.
 - **Diagrams in your notes.** Flow describes a system and how it changes over time. Flotion lays out the nodes and arrows and plays the steps in the page.
-- **An assistant in the app.** A side panel that knows the open page, and "Edit with AI" on selected text. Choose Claude, ChatGPT (OpenAI), Gemini, Grok, or Cursor from the Assistant panel.
+- **An assistant in the app.** A side panel that knows the open page, and "Edit with AI" on selected text. Choose Claude, ChatGPT, or Gemini from the Assistant panel.
 
 ## Diagrams with Flow
 
@@ -96,7 +96,13 @@ open .build/xcode/Build/Products/Debug/Flotion.app
 
 ## Connect an LLM
 
-**Inside the app:** open Settings, choose a provider, and enable the models you want in the picker. [Claude Code](https://code.claude.com/docs/en/setup) uses your existing sign-in. OpenAI, Gemini, and Grok use API keys. Cursor requires the [Cursor CLI](https://cursor.com/docs/cli/installation) and a Cursor API key. Flotion stores API keys in macOS Keychain.
+**Inside the app:** install [Claude Code](https://code.claude.com/docs/en/setup), [Codex CLI](https://developers.openai.com/codex/cli), or [Gemini CLI](https://geminicli.com/docs/get-started/installation/) for the provider you want to use. Open Settings, select the provider, and enable the models you want in the picker.
+
+- **Claude** uses your Claude Code sign-in.
+- **ChatGPT** uses your Codex CLI sign-in with a ChatGPT account.
+- **Gemini** uses a separate Gemini CLI profile for Flotion. Click **Sign in to Gemini**, choose **Sign in with Google** in Terminal, and complete the browser flow.
+
+Use **Check again** in Settings after signing in.
 
 Press ⌘J and choose a model above the composer. Claude can read and edit the workspace. The other providers can answer questions about the open page and draft text. All providers can preview inline edits for you to apply.
 
