@@ -1,3 +1,4 @@
+import AppKit
 import FlotionAI
 import SwiftUI
 
@@ -49,6 +50,9 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 560, height: 580)
         .task { await model.ai?.refreshStatus() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await model.ai?.refreshStatus() }
+        }
     }
 }
 
@@ -74,10 +78,20 @@ private struct ProviderSettings: View {
                 Button("Check again") { Task { await ai.refreshStatus() } }
             }
 
+            if service != .claude, case .ready = ai.statuses[service] {
+                if ai.loadingModelCatalogs.contains(service) {
+                    ProgressView("Loading available models…").controlSize(.small)
+                } else if ai.modelCatalogs[service] == nil {
+                    Text("Couldn’t load the model list. Check again or update \(service.cliName).")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+            }
+
             ForEach(ai.allModels.filter { $0.service == service }) { model in
-                let isLast = ai.enabledIDs.contains(model.id) && ai.enabledIDs.count == 1
+                let isVisible = ai.visibleModels.contains { $0.id == model.id }
+                let isLast = isVisible && ai.visibleModels.count == 1
                 HStack {
-                    Toggle(model.name, isOn: Binding(get: { ai.enabledIDs.contains(model.id) },
+                    Toggle(model.name, isOn: Binding(get: { ai.visibleModels.contains { $0.id == model.id } },
                                                      set: { ai.setEnabled($0, for: model) }))
                         .disabled(isLast)
                         .help(isLast ? "Enable another model before hiding this one." : "Show in the Assistant model picker.")

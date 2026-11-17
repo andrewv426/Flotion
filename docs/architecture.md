@@ -93,6 +93,8 @@ Claude Code handles its own sign-in. Flotion runs the unmodified `claude` binary
 
 ## Context and storage
 
+Settings refreshes the signed-in model catalogs through Codex app-server's `model/list` and Gemini CLI's `--list-models --output-format json`. These metadata requests use the same account profiles as chat and stop after 15 seconds. Codex pagination and hidden entries are handled before publishing the list. New entries appear in the Assistant picker automatically, and model visibility choices persist in preferences. Catalogs refresh on return to Settings after sign-in and through **Check again**.
+
 Flotion keeps the visible transcript in `ChatSession` in memory, for the life of the open chat. On a model switch it clears the native session ID and remembered page. The next send includes up to 12 recent completed exchanges within roughly 16 KB of text, plus the current page and selection. This replay carries prior user messages and assistant replies (including an annotation for an undone edit). Earlier page snapshots, tool arguments and results, and failed and stopped turns stay out of the replay. A long current page is fetched with `get_page` if needed.
 
 Codex and Gemini start a new CLI request and receive that replay on every turn. Claude can reuse its own session for consecutive turns with the same model. **New Chat** clears Flotion's conversation. Claude Code and Gemini CLI may retain their own local sessions under their respective CLI profiles. Flotion runs Codex with `--ephemeral`, which disables its session rollout files.

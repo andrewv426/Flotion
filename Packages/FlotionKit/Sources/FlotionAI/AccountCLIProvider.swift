@@ -191,13 +191,13 @@ public struct AccountCLIProvider: AIProvider {
         }
     }
 
-    private func command(_ executable: URL, _ arguments: [String], in turnDirectory: URL? = nil) -> AICommand {
+    func command(_ executable: URL, _ arguments: [String], in turnDirectory: URL? = nil) -> AICommand {
         var environment = AICommand.loginEnvironment(executable: executable)
         if cli == .gemini { environment["GEMINI_CLI_HOME"] = profile.path }
         return AICommand(executable: executable, arguments: arguments, directory: turnDirectory ?? directory, environment: environment)
     }
 
-    private func prepareDirectory() throws {
+    func prepareDirectory() throws {
         let files = FileManager.default
         try files.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         guard cli == .gemini else { return }

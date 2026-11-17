@@ -57,7 +57,7 @@ struct AIPanelView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Picker("Assistant model", selection: Binding(get: { ai.selectedModelID }, set: { ai.selectModel($0) })) {
+            Picker("Assistant model", selection: Binding(get: { ai.selectedModel.id }, set: { ai.selectModel($0) })) {
                 ForEach(ai.visibleModels) { model in
                     Text(model.label).tag(model.id)
                 }

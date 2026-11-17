@@ -96,6 +96,8 @@ open .build/xcode/Build/Products/Debug/Flotion.app
 
 ## Connect an LLM
 
+After signing in to ChatGPT or Gemini in Settings, Flotion loads the models reported by the installed CLI and adds them to the Assistant picker. Model toggles let you hide choices, and **Check again** refreshes the list. Returning from sign-in also refreshes Settings. Gemini model discovery requires a CLI version with `--list-models` support (0.67 or later).
+
 **Inside the app:** install [Claude Code](https://code.claude.com/docs/en/setup), [Codex CLI](https://developers.openai.com/codex/cli), or [Gemini CLI](https://geminicli.com/docs/get-started/installation/) for the provider you want to use. Open Settings, select the provider, and enable the models you want in the picker.
 
 - **Claude** uses your Claude Code sign-in.

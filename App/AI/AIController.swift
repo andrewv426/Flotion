@@ -20,8 +20,12 @@ final class AIController {
     @ObservationIgnored private var providers: [AssistantService: any AIProvider] = [:]
     @ObservationIgnored private let scratch: URL
     @ObservationIgnored private var statusRefresh = UUID()
+    @ObservationIgnored private var configuredModel: AssistantModel?
+    @ObservationIgnored private var knownCatalogIDs: Set<String>
 
     private(set) var statuses: [AssistantService: AIProviderStatus] = [:]
+    private(set) var modelCatalogs: [AssistantService: [AssistantModel]] = [:]
+    private(set) var loadingModelCatalogs: Set<AssistantService> = []
     private(set) var enabledIDs: Set<String>
     private(set) var customModels: [AssistantModel]
     private(set) var selectedModelID: String
@@ -34,9 +38,19 @@ final class AIController {
         }
     }
 
-    var allModels: [AssistantModel] { AssistantModel.suggested + customModels }
-    var visibleModels: [AssistantModel] { allModels.filter { enabledIDs.contains($0.id) } }
-    var selectedModel: AssistantModel { visibleModels.first { $0.id == selectedModelID } ?? .claudeDefault }
+    var allModels: [AssistantModel] {
+        var seen = Set<String>()
+        let discovered = AssistantService.allCases.flatMap { modelCatalogs[$0] ?? [] }
+        return (AssistantModel.suggested + customModels + discovered).filter { seen.insert($0.id).inserted }
+    }
+    var visibleModels: [AssistantModel] {
+        let visible = allModels.filter { enabledIDs.contains($0.id) }
+        return visible.isEmpty ? [.claudeDefault] : visible
+    }
+    var selectedModel: AssistantModel {
+        let visible = visibleModels
+        return visible.first { $0.id == selectedModelID } ?? visible[0]
+    }
     var status: AIProviderStatus? { statuses[selectedModel.service] }
     var isReady: Bool {
         if case .ready = status { return true }
@@ -69,10 +83,11 @@ final class AIController {
         let allModels = AssistantModel.suggested + models
         let enabled = Set(defaults.stringArray(forKey: "assistantEnabledModels") ?? allModels.filter { $0.service == .claude }.map(\.id))
         let visible = allModels.filter { enabled.contains($0.id) }
-        let initial = visible.first { $0.id == previousID } ?? visible.first ?? .claudeDefault
+        let initialID = enabled.contains(previousID) ? previousID : (visible.first ?? .claudeDefault).id
+        knownCatalogIDs = Set(defaults.stringArray(forKey: "assistantKnownCatalogIDs") ?? [])
         customModels = models
-        enabledIDs = visible.isEmpty ? [initial.id] : Set(visible.map(\.id))
-        selectedModelID = initial.id
+        enabledIDs = enabled.isEmpty ? [initialID] : enabled
+        selectedModelID = initialID
         let claude: any AIProvider = usesFakeProviders
             ? Self.fakeProvider(workspace: workspace, sessionID: "fake-session") : ClaudeCodeProvider(workingDirectory: scratch)
         chat = ChatSession(provider: claude, workspace: workspace, server: serverURL)
@@ -113,10 +128,50 @@ final class AIController {
         guard refresh == statusRefresh, !Task.isCancelled else { return }
         statuses = updated
         prewarm()
+
+        if usesFakeProviders {
+            applyCatalog([AccountModel(id: "codex-test", name: "Codex Test")], for: .openAI)
+            applyCatalog([AccountModel(id: "gemini-test", name: "Gemini Test")], for: .gemini)
+            return
+        }
+        let catalogs = providers.compactMapValues { $0 as? AccountCLIProvider }
+            .filter { service, _ in
+                if case .ready = updated[service] { return true }
+                return false
+            }
+        let previousModel = selectedModel
+        modelCatalogs = modelCatalogs.filter { catalogs[$0.key] != nil }
+        if selectedModel != previousModel { selectCurrentProvider() }
+        loadingModelCatalogs = Set(catalogs.keys)
+        defer { if refresh == statusRefresh { loadingModelCatalogs.removeAll() } }
+        await withTaskGroup(of: (AssistantService, [AccountModel]?).self) { group in
+            for (service, provider) in catalogs {
+                group.addTask { (service, await provider.availableModels()) }
+            }
+            for await (service, models) in group {
+                guard refresh == statusRefresh, !Task.isCancelled else { return }
+                applyCatalog(models, for: service)
+                loadingModelCatalogs.remove(service)
+            }
+        }
+    }
+
+    private func applyCatalog(_ models: [AccountModel]?, for service: AssistantService) {
+        let previousModel = selectedModel
+        let existingIDs = Set((AssistantModel.suggested + customModels).map(\.id))
+        let discovered = models?.filter { !$0.id.isEmpty && !(service == .gemini && $0.id == "auto") }
+            .map { AssistantModel(service: service, alias: $0.id, name: $0.name) }
+        modelCatalogs[service] = discovered
+        for model in discovered ?? [] where knownCatalogIDs.insert(model.id).inserted {
+            if !existingIDs.contains(model.id) { enabledIDs.insert(model.id) }
+        }
+        persistModels()
+        if selectedModel != previousModel { selectCurrentProvider() }
     }
 
     func selectModel(_ id: String) {
-        guard !chat.isRunning, id != selectedModelID, enabledIDs.contains(id) else { return }
+        guard !chat.isRunning, id != selectedModelID, visibleModels.contains(where: { $0.id == id }) else { return }
+        enabledIDs.insert(id)
         selectedModelID = id
         selectCurrentProvider()
         persistModels()
@@ -127,7 +182,7 @@ final class AIController {
         if enabled {
             enabledIDs.insert(model.id)
         } else {
-            guard enabledIDs.count > 1 else { return }
+            guard !enabledIDs.contains(model.id) || visibleModels.count > 1 else { return }
             enabledIDs.remove(model.id)
             if model.id == selectedModelID, let first = visibleModels.first { selectModel(first.id) }
         }
@@ -145,7 +200,7 @@ final class AIController {
     }
 
     func removeModel(_ model: AssistantModel) {
-        guard !chat.isRunning, !enabledIDs.contains(model.id) || enabledIDs.count > 1 else { return }
+        guard !chat.isRunning, !enabledIDs.contains(model.id) || visibleModels.count > 1 else { return }
         setEnabled(false, for: model)
         customModels.removeAll { $0.id == model.id }
         persistModels()
@@ -154,18 +209,26 @@ final class AIController {
     private func persistModels() {
         let defaults = AppDefaults.store
         defaults.set(Array(enabledIDs).sorted(), forKey: "assistantEnabledModels")
+        defaults.set(Array(knownCatalogIDs).sorted(), forKey: "assistantKnownCatalogIDs")
         defaults.set(selectedModelID, forKey: "assistantModel")
         defaults.set(try? JSONEncoder().encode(customModels), forKey: "assistantCustomModels")
     }
 
     private func selectCurrentProvider() {
+        guard !chat.isRunning else { return }
         let model = selectedModel
+        configuredModel = model
         chat.configure(provider: provider, model: model.alias.isEmpty ? nil : model.alias, label: model.label)
         prewarm()
     }
 
     private func prewarm() {
-        if isPanelOpen, isReady { chat.prewarm() }
+        if isPanelOpen, isReady, configuredModel == selectedModel { chat.prewarm() }
+    }
+
+    func send(_ text: String, context: PageContext?) {
+        if configuredModel != selectedModel { selectCurrentProvider() }
+        chat.send(text, context: context)
     }
 
     func newChat() {

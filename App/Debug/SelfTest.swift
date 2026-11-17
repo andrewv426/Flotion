@@ -591,6 +591,24 @@ enum SelfTest {
             let priorMessages = ai.chat.messages.count
             let alternatives = AssistantModel.suggested.filter { $0.service != .claude }
             check(alternatives.count == 2, "ChatGPT and Gemini are available in Settings")
+            let discovered = ai.allModels.filter { $0.alias == "codex-test" || $0.alias == "gemini-test" }
+            check(discovered.count == 2 && discovered.allSatisfy { ai.visibleModels.contains($0) },
+                  "discovered account models appear in the picker automatically")
+            if let model = discovered.first {
+                ai.selectModel(model.id)
+                check(ai.selectedModel == model, "a discovered model can be selected")
+                let restored = AIController(workspace: ai.workspace)
+                await restored.refreshStatus()
+                check(restored.selectedModel == model, "the discovered model selection survives relaunch")
+                ai.setEnabled(false, for: model)
+                await ai.refreshStatus()
+                check(!ai.visibleModels.contains(model), "refreshing keeps a discovered model hidden")
+                let restoredHidden = AIController(workspace: ai.workspace)
+                await restoredHidden.refreshStatus()
+                check(!restoredHidden.visibleModels.contains(model), "a hidden discovered model stays hidden after relaunch")
+                ai.setEnabled(true, for: model)
+                ai.selectModel(AssistantModel.claudeDefault.id)
+            }
             for (index, alternative) in alternatives.enumerated() {
                 ai.setEnabled(false, for: alternative)
                 check(!ai.visibleModels.contains(alternative), "a hidden model is absent from the picker")

@@ -51,6 +51,64 @@ import Testing
         #expect(await events(provider, request()).last == .finished(.failed(.notSignedIn, "Sign in to ChatGPT in the CLI.")))
     }
 
+    @Test func codexListsVisibleModelsAcrossCatalogPagesWithoutStartingATurn() async throws {
+        let folder = try directory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let binary = try stub(in: folder, script: #"""
+            [[ "$1" == "app-server" && "$*" == *'forced_login_method="chatgpt"'* ]]
+            read -r line
+            [[ "$line" == *'"initialize"'* ]]
+            echo '{"id":0,"result":{"userAgent":"codex"}}'
+            read -r line
+            [[ "$line" == *'"initialized"'* ]]
+            read -r line
+            [[ "$line" == *'"model/list"'* ]]
+            echo '{"id":1,"result":{"data":[{"model":"first","displayName":"First"},{"model":"hidden","displayName":"Hidden","hidden":true}],"nextCursor":"second page"}}'
+            read -r line
+            [[ "$line" == *'"second page"'* && "$line" == *'"model/list"'* ]]
+            echo '{"id":2,"result":{"data":[{"model":"second","displayName":"Second"}],"nextCursor":null}}'
+            """#)
+        let provider = AccountCLIProvider(.codex, executable: binary, directory: folder)
+        #expect(await provider.availableModels() == [
+            AccountModel(id: "first", name: "First"), AccountModel(id: "second", name: "Second"),
+        ])
+    }
+
+    @Test func geminiListsModelsInTheFlotionSignInProfile() async throws {
+        let folder = try directory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let binary = try stub(in: folder, script: #"""
+            [[ "$*" == "--list-models --output-format json" && -z "${GEMINI_API_KEY:-}" ]]
+            grep -Fq '"enforcedType": "oauth-personal"' "$GEMINI_CLI_HOME/.gemini/settings.json"
+            [[ -f "$GEMINI_CLI_HOME/.gemini/oauth_creds.json" && ! -f .gemini/settings.json ]]
+            [[ -z "$(cat)" ]]
+            echo '['
+            echo '  {"modelId":"gemini-test","displayName":"Gemini Test"}'
+            echo ']'
+            """#)
+        let provider = AccountCLIProvider(.gemini, executable: binary, directory: folder)
+        _ = try provider.signInCommand()
+        try Data().write(to: provider.geminiCredentials)
+        #expect(await provider.availableModels() == [AccountModel(id: "gemini-test", name: "Gemini Test")])
+    }
+
+    @Test func catalogErrorsAndCancellationReturnWithoutInventingModels() async throws {
+        let folder = try directory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let rejected = try stub(in: folder, script: #"""
+            read -r line
+            echo '{"id":0,"error":{"code":-32600,"message":"Sign in required"}}'
+            """#)
+        let provider = AccountCLIProvider(.codex, executable: rejected, directory: folder)
+        #expect(await provider.availableModels() == nil)
+        let sleeping = try stub(in: folder, script: "exec /bin/sleep 30")
+        let stalled = AccountCLIProvider(.codex, executable: sleeping, directory: folder)
+        let task = Task { await stalled.availableModels() }
+        try await Task.sleep(for: .milliseconds(50))
+        task.cancel()
+        #expect(await task.value == nil)
+    }
+
     @Test func geminiUsesOneProfileForGoogleSignInAndHeadlessRequests() async throws {
         let folder = try directory()
         defer { try? FileManager.default.removeItem(at: folder) }
