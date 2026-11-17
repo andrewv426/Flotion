@@ -283,7 +283,14 @@ enum SelfTest {
                     let bottom = clip.bounds.minY
                     if web.visibleRect.contains(NSPoint(x: web.bounds.midX, y: web.bounds.midY)),
                        let wheel = TestHost.wheelEvent(over: web, deltaY: 40) {
-                        w.sendEvent(wheel)
+                        // Dequeue the event so AppKit exposes it as the current event during hit-testing.
+                        NSApp.postEvent(wheel, atStart: true)
+                        if let queuedWheel = NSApp.nextEvent(matching: .scrollWheel, until: .distantPast, inMode: .default, dequeue: true) {
+                            let wheelPoint = table.convert(queuedWheel.locationInWindow, from: nil)
+                            check(table.hitTest(table.convert(wheelPoint, to: table.superview)) === table,
+                                  "a wheel event over the interactive diagram targets the editor directly")
+                            w.sendEvent(queuedWheel)
+                        }
                         await waitFor(1) { clip.bounds.minY < bottom }
                         check(clip.bounds.minY < bottom, "a wheel turn over the interactive diagram scrolls the page")
                     } else {

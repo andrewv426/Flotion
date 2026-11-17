@@ -107,7 +107,9 @@ final class EditorTableView: NSTableView {
         if modifiers.contains([.command, .shift]) || modifiers.contains(.control) || event?.type == .rightMouseDown {
             return (cell, cell)
         }
-        return (cell, cell.interactiveHit(at: localPoint) ?? cell)
+        guard let target = cell.interactiveHit(at: localPoint) else { return (cell, cell) }
+        // Keep both scrolling and momentum on AppKit's native responder chain.
+        return (cell, event?.type == .scrollWheel ? self : target)
     }
 
     override func keyDown(with event: NSEvent) {

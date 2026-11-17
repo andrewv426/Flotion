@@ -2,17 +2,6 @@ import AppKit
 import FlotionCore
 import WebKit
 
-private final class DiagramWebView: WKWebView {
-    override func scrollWheel(with event: NSEvent) {
-        // Scroll the editor even when the pointer is over an interactive diagram.
-        if let scrollView = enclosingScrollView {
-            scrollView.scrollWheel(with: event)
-        } else {
-            super.scrollWheel(with: event)
-        }
-    }
-}
-
 /// Builds the locked-down web views that render diagrams.
 ///
 /// Two independent layers keep LLM-authored content offline: the document's
@@ -46,7 +35,7 @@ enum DiagramSandbox {
         config.websiteDataStore = .nonPersistent()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         if let rules { config.userContentController.add(rules) }
-        let webView = DiagramWebView(frame: .zero, configuration: config)
+        let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground") // let the page colour show through
         webView.allowsMagnification = false
         return webView
