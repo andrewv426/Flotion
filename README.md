@@ -5,12 +5,78 @@ A minimal, native notes app for macOS in the style of Notion, built so that LLMs
 - **Just the core loop.** Nested pages, a block editor, and one SQLite file to keep them in.
 - **Native and fast.** SwiftUI and AppKit, no web runtime for the editor. A 5,000-block page opens in under 30 ms.
 - **MCP built in.** A bundled server lets Claude Code, Claude Desktop or any MCP client search, read and edit the workspace.
-- **Animated diagrams.** An LLM writes a diagram in Flow, a small text language: what exists and what changes at each step. Flotion lays it out, draws the arrows and animates it, so every diagram looks the same and none needs coordinates.
+- **Diagrams in your notes.** Flow describes a system and how it changes over time. Flotion lays out the nodes and arrows and plays the steps in the page.
 - **An assistant in the app.** A side panel that knows the open page, and "Edit with AI" on selected text. It runs on your Claude subscription through Claude Code; there is no API key.
 
-![A page with a step-through diagram](docs/images/page-with-diagram.png)
+## Diagrams with Flow
 
-![The assistant panel after an edit](docs/images/assistant-panel.png)
+Flow is Flotion’s line-based language for diagrams. Declare nodes and arrows to draw a still picture, then add `step` blocks if you want to walk through changes. Flotion calculates the layout and keeps node positions fixed as you step through the diagram.
+
+### A release pipeline
+
+The diagram branches at the test result. The dashed arrow shows where the team retries after a failure.
+
+<img src="docs/images/flow-release-pipeline.png" alt="Release pipeline from push to build and tests, then deploy on success or fix and rebuild on failure" width="792">
+
+```text
+flow right
+push: Push commit {shape: pill}
+build: Build
+test: Tests pass? {shape: diamond}
+deploy: Deploy
+fix: Fix failure
+
+push -> build -> test
+test -> deploy: yes
+test -> fix: no
+fix -> build {style: dashed}
+```
+
+### A feed request with a cache miss
+
+The player can reveal each part of a request in order. These two frames show the cache miss and the response going back to the browser. The `miss` tag and its warning color carry forward after the cache lookup.
+
+<img src="docs/images/flow-cache-miss.png" alt="Cache miss step with the API and Redis in focus and a warning on Redis" width="616">
+
+<img src="docs/images/flow-cache-response.png" alt="Respond step with a 200 OK arrow from the API to the browser and the Redis miss tag still visible" width="616">
+
+```text
+flow right
+browser: Browser {shape: pill}
+api: Feed API
+group storage "Storage" {
+  redis: Redis {shape: database}
+  db: Postgres {shape: database}
+}
+
+browser -> api
+api -> redis
+api -> db
+
+step "Request": The browser asks for its feed.
+  send browser -> api: GET /feed
+
+step "Cache miss": The API checks Redis and finds no cached feed.
+  focus api, redis
+  send api -> redis: lookup
+  tag redis: miss
+  mark redis: warn
+
+step "Read from storage": The API fetches the feed from Postgres.
+  focus api, db
+  send api -> db: read feed
+
+step "Respond": The API returns the feed to the browser.
+  send api -> browser: 200 OK
+  tag browser: feed loaded
+  mark browser: good
+```
+
+- `flow right` and `flow down` set the layout direction. Declare each node before referencing its ID in an arrow or step.
+- `group` draws a boundary around related nodes. `step "Title": caption` adds a frame to the player and starts that step’s list of changes.
+- `send` animates a message along an existing arrow in either direction, and `focus` dims the surrounding nodes for that step. Changes made with `tag`, `mark`, `set`, `hide`, and `show` carry forward.
+
+To try an example, open the assistant with ⌘J and ask it to insert a diagram in the current page using the pasted Flow source. From an MCP client, call `create_diagram` with `page_id`, `title`, and the Flow text as `source`.
 
 ## Requirements
 
@@ -31,6 +97,8 @@ open .build/xcode/Build/Products/Debug/Flotion.app
 ## Connect an LLM
 
 **Inside the app:** open Settings, sign in to Claude, then press ⌘J.
+
+![The assistant panel after an edit](docs/images/assistant-panel.png)
 
 **From Claude Code or another MCP client:**
 
