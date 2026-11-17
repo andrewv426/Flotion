@@ -3,6 +3,7 @@ import AppKit
 import FlotionAI
 import FlotionCore
 import FlotionEditor
+import SwiftUI
 import WebKit
 
 /// An in-process UI smoke test, run with `FLOTION_SELFTEST=<output dir>`.
@@ -58,8 +59,8 @@ enum SelfTest {
                                                charactersIgnoringModifiers: character, isARepeat: false, keyCode: code) else { return }
             table.keyDown(with: event)
         }
-        func snapshot(_ name: String) {
-            guard let view = window()?.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+        func snapshot(_ name: String, view explicitView: NSView? = nil) {
+            guard let view = explicitView ?? window()?.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
                 failures.append("no window to snapshot for \(name)")
                 return
             }
@@ -374,8 +375,10 @@ enum SelfTest {
             }
         }
 
-        // The assistant (a scripted provider stands in for Claude; see AIController.fakeProvider).
+        // Scripted providers exercise the same model selection as the real Assistant.
         if let ai = model.ai {
+            ai.setEnabled(true, for: .claudeDefault)
+            ai.selectModel(AssistantModel.claudeDefault.id)
             await ai.refreshStatus()
             check(ai.status == .ready(plan: "test"), "the assistant reports ready")
             ai.isPanelOpen = true
@@ -407,6 +410,7 @@ enum SelfTest {
             }
             if let tv = findTextView(window()?.contentView, containing: "Last line"), let controller = tv.controller {
                 window()?.makeFirstResponder(tv)
+                tv.setSelectedRange(NSRange(location: 0, length: 0))
                 tv.setSelectedRange(NSRange(location: 0, length: 4))
                 await waitFor(2) { model.selection != nil }
                 check(model.selection?.text == "Last", "selecting text is tracked for the assistant (first responder is the block: \(window()?.firstResponder === tv), responder: \(String(describing: window()?.firstResponder).prefix(60)), delegate set: \(tv.delegate != nil), controller selection: \(String(describing: controller.currentSelection?.text)))")
@@ -607,6 +611,93 @@ enum SelfTest {
         } else {
             check(true, "a test run does not restore or save the window")
         }
+        // Run the follow-up edit checks after the focus-sensitive editor interactions.
+        if let ai = model.ai, let smokeID = model.pages.first(where: { $0.title == "Smoke test" })?.id {
+            await model.open(smokeID)
+            await pause(200)
+            let before = model.editor?.blocks.count ?? 0
+            let priorMessages = ai.chat.messages.count
+            let alternatives = AssistantModel.suggested.filter { $0.service != .claude }
+            check(alternatives.count == 2, "ChatGPT and Antigravity are available in Settings")
+            let discovered = ai.allModels.filter { $0.alias == "codex-test" || $0.alias == "agy-test" }
+            check(discovered.count == 2 && discovered.allSatisfy { ai.visibleModels.contains($0) },
+                  "discovered account models appear in the picker automatically")
+            if let model = discovered.first {
+                ai.selectModel(model.id)
+                check(ai.selectedModel == model, "a discovered model can be selected")
+                let restored = AIController(workspace: ai.workspace)
+                await restored.refreshStatus()
+                check(restored.selectedModel == model, "the discovered model selection survives relaunch")
+                ai.setEnabled(false, for: model)
+                await ai.refreshStatus()
+                check(!ai.visibleModels.contains(model), "refreshing keeps a discovered model hidden")
+                let restoredHidden = AIController(workspace: ai.workspace)
+                await restoredHidden.refreshStatus()
+                check(!restoredHidden.visibleModels.contains(model), "a hidden discovered model stays hidden after relaunch")
+                ai.setEnabled(true, for: model)
+                ai.selectModel(AssistantModel.claudeDefault.id)
+            }
+            for (index, alternative) in alternatives.enumerated() {
+                ai.setEnabled(false, for: alternative)
+                check(!ai.visibleModels.contains(alternative), "a hidden model is absent from the picker")
+                ai.setEnabled(true, for: alternative)
+                ai.selectModel(alternative.id)
+                let restored = AIController(workspace: ai.workspace)
+                check(restored.selectedModel == alternative && restored.visibleModels.contains(alternative), "model choice and visibility persist")
+                await model.sendChat("Add a follow-up summary to this page")
+                await waitFor { !ai.chat.isRunning && ai.chat.messages.count == priorMessages + (index + 1) * 2 }
+                await waitFor { (model.editor?.blocks.count ?? 0) == before + 1 }
+                let followUp = ai.chat.messages.last
+                check(followUp?.text == "Added a summary to the end of the page." && followUp?.modelLabel == alternative.label,
+                      "\(alternative.service.label) takes the follow-up in the same chat")
+                check(followUp?.tools.map(\.label) == ["Adding content"] && followUp?.changeCount == 1
+                      && model.editor?.blocks.count == before + 1, "\(alternative.service.label) edits the page and reports the change")
+                if alternative.service == .openAI {
+                    await pause(150)
+                    snapshot("08b-assistant-model-switch")
+                }
+                if let followUp {
+                    await ai.chat.undo(followUp.id)
+                    await waitFor { (model.editor?.blocks.count ?? 0) == before }
+                    check(model.editor?.blocks.count == before, "Undo reverts the \(alternative.service.label) edit")
+                }
+                ai.setEnabled(false, for: alternative)
+                check(ai.selectedModel == .claudeDefault && !ai.visibleModels.contains(alternative),
+                      "hiding the active model selects an available model")
+            }
+        } else {
+            check(false, "the smoke page is available for ChatGPT and Antigravity")
+        }
+
+        // Render the Settings window after the tests that use the editor's first responder.
+        if let ai = model.ai, let antigravity = AssistantModel.suggested.first(where: { $0.service == .antigravity }) {
+            ai.setEnabled(true, for: antigravity)
+            ai.selectModel(antigravity.id)
+            let settingsWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 580),
+                                          styleMask: [.borderless], backing: .buffered, defer: false)
+            let settings = NSHostingView(rootView: SettingsView(model: model))
+            settingsWindow.contentView = settings
+            settings.layoutSubtreeIfNeeded()
+            await pause(150)
+            snapshot("08c-assistant-model-settings", view: settings)
+            ai.setEnabled(false, for: antigravity)
+        }
+
+        if let workspace = model.workspace {
+            let defaults = AppDefaults.store
+            defaults.set(Data(#"[{"service":"openAI","alias":"saved-custom","name":"Saved model"},{"service":"gemini","alias":"gemini-3.5-flash","name":"Old Gemini"}]"#.utf8),
+                         forKey: "assistantCustomModels")
+            defaults.set(["gemini:gemini-3.5-flash", "openAI:saved-custom"], forKey: "assistantEnabledModels")
+            defaults.set("gemini:gemini-3.5-flash", forKey: "assistantModel")
+            let migrated = AIController(workspace: workspace)
+            check(migrated.selectedModel.service == .antigravity && migrated.selectedModel.alias.isEmpty,
+                  "a saved Gemini selection migrates to the Antigravity account default")
+            check(migrated.customModels.contains { $0.id == "openAI:saved-custom" },
+                  "migrating Gemini preserves custom models for other providers")
+            check(!migrated.allModels.contains { $0.alias == "gemini-3.5-flash" },
+                  "obsolete Gemini CLI IDs are removed from the picker")
+        }
+
         if TestHost.focusTakenCount > 0 {
             log.append("note macOS made the background app active \(TestHost.focusTakenCount) time(s); it gave focus straight back")
         }

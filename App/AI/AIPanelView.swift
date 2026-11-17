@@ -10,15 +10,10 @@ struct AIPanelView: View {
     @State private var draft = ""
     @FocusState private var composerFocused: Bool
 
-    private var isReady: Bool {
-        if case .ready = ai.status { return true }
-        return false
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             header
-            if let status = ai.status, !isReady {
+            if let status = ai.status, !ai.isReady {
                 ConnectCard(status: status, ai: ai)
             }
             messages
@@ -45,7 +40,7 @@ struct AIPanelView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     if ai.chat.messages.isEmpty {
-                        EmptyChat { send($0) }
+                        EmptyChat(workspaceTools: ai.provider.supportsWorkspaceTools, ask: send)
                     }
                     ForEach(ai.chat.messages) { message in
                         MessageView(message: message) { Task { await ai.chat.undo(message.id) } }
@@ -62,6 +57,17 @@ struct AIPanelView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 8) {
+            Picker("Assistant model", selection: Binding(get: { ai.selectedModel.id }, set: { ai.selectModel($0) })) {
+                ForEach(ai.visibleModels) { model in
+                    Text(model.label).tag(model.id)
+                }
+            }
+            .labelsHidden()
+            .controlSize(.small)
+            .frame(maxWidth: 280, alignment: .leading)
+            .disabled(ai.chat.isRunning)
+            .help("The selected provider receives recent chat turns and the open page.")
+            .accessibilityIdentifier("assistant-model")
             if model.selectedPageID != nil {
                 HStack(spacing: 4) {
                     Image(systemName: "doc.text").font(.system(size: 10))
@@ -74,7 +80,7 @@ struct AIPanelView: View {
                 .foregroundStyle(Color(nsColor: Theme.secondary))
             }
             HStack(alignment: .bottom, spacing: 8) {
-                TextField("Ask, or say what to change…", text: $draft, axis: .vertical)
+                TextField(ai.provider.supportsWorkspaceTools ? "Ask, or say what to change…" : "Ask about this page…", text: $draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.system(size: 14))
                     .lineLimit(1...6)
@@ -93,7 +99,7 @@ struct AIPanelView: View {
                     IconButton(symbol: "stop.circle.fill", help: "Stop") { ai.chat.stop() }
                 } else {
                     IconButton(symbol: "arrow.up.circle.fill", help: "Send") { send(draft) }
-                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !isReady)
+                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !ai.isReady)
                 }
             }
         }
@@ -104,19 +110,25 @@ struct AIPanelView: View {
     }
 
     private func send(_ text: String) {
-        guard isReady, !ai.chat.isRunning else { return }
+        guard ai.isReady, !ai.chat.isRunning else { return }
         draft = ""
         Task { await model.sendChat(text) }
     }
 }
 
 private struct EmptyChat: View {
+    let workspaceTools: Bool
     let ask: (String) -> Void
-    private let suggestions = ["Summarise this page", "List the action items on this page", "Draw a step-by-step diagram of this page"]
+
+    private var suggestions: [String] {
+        ["Summarise this page", "List the action items on this page"]
+            + (workspaceTools ? ["Draw a step-by-step diagram of this page"] : [])
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Ask about this page or the rest of your notes, or have them edited for you.")
+            Text(workspaceTools ? "Ask about this page or the rest of your notes, or have them edited for you."
+                     : "Ask about the open page or draft text to paste into your notes.")
                 .font(.system(size: 13))
                 .foregroundStyle(Color(nsColor: Theme.secondary))
             ForEach(suggestions, id: \.self) { suggestion in
@@ -147,6 +159,11 @@ private struct MessageView: View {
                 .foregroundStyle(Color(nsColor: Theme.text))
         } else {
             VStack(alignment: .leading, spacing: 8) {
+                if let modelLabel = message.modelLabel {
+                    Text(modelLabel)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color(nsColor: Theme.secondary))
+                }
                 ForEach(message.tools) { tool in
                     HStack(spacing: 6) {
                         if tool.isDone {
@@ -196,26 +213,21 @@ private struct MessageView: View {
     }
 }
 
-/// Shown when Claude Code is missing or signed out.
+/// Shown when the selected provider needs setup.
 struct ConnectCard: View {
     let status: AIProviderStatus
     let ai: AIController
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(status == .notInstalled ? "Claude Code is not installed" : "Claude is signed out")
+            let service = ai.selectedModel.service
+            Text(status == .notInstalled ? "Install \(service.cliName)" : "Connect \(service.label)")
                 .font(.system(size: 13, weight: .semibold))
-            Text(status == .notInstalled
-                 ? "The assistant runs on your Claude subscription through Claude Code. Install it, then sign in."
-                 : "The assistant runs on your Claude subscription. Sign in through Claude Code; Flotion never sees your password or token.")
-                .font(.system(size: 12))
-                .foregroundStyle(Color(nsColor: Theme.secondary))
-                .fixedSize(horizontal: false, vertical: true)
             HStack {
                 if status == .notInstalled {
-                    Link("Install Claude Code", destination: URL(string: "https://code.claude.com/docs/en/setup")!)
+                    Link("Installation guide", destination: service.installURL)
                 } else {
-                    Button("Sign in…") { ai.openSignIn() }
+                    Button("Sign in…") { ai.openSignIn(service) }
                 }
                 Button("Check again") { Task { await ai.refreshStatus() } }
             }

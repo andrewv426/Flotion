@@ -272,6 +272,85 @@ private func tempDirectory() throws -> URL {
         #expect(actor.hasPrefix("chat:"))
     }
 
+    @Test func switchingTargetsReplaysCompletedTurnsAndRefreshesPageContext() async throws {
+        let ws = try Workspace.temporary()
+        let claude = FakeProvider { request in
+            if request.prompt.hasSuffix("failed turn") {
+                return [.text("discard this partial reply"), .finished(.failed(.other, "request failed"))]
+            }
+            return [.finished(AIResult(text: "The launch is in May.", sessionID: "claude-session"))]
+        }
+        let antigravity = FakeProvider(supportsWorkspaceTools: false) { _ in [.finished(AIResult(text: "May works."))] }
+        let session = ChatSession(provider: claude, workspace: ws, server: server)
+        session.configure(provider: claude, model: "sonnet", label: "Claude Sonnet")
+        let oldPage = PageContext(pageID: "old", title: "Old", markdown: "Old page body")
+        let page = PageContext(pageID: "new", title: "New", markdown: "Current page body", selection: "Current")
+        session.send("When is the launch?", context: oldPage)
+        await waitUntilIdle(session)
+        session.send("failed turn", context: oldPage)
+        await waitUntilIdle(session)
+
+        session.configure(provider: antigravity, model: "agy-model", label: "Antigravity")
+        session.send("Will that month work?", context: page)
+        await waitUntilIdle(session)
+        session.send("Why?", context: page)
+        await waitUntilIdle(session)
+
+        let first = try #require(antigravity.requests.first)
+        #expect(first.model == "agy-model")
+        #expect(first.resumeSessionID == nil)
+        #expect(first.tools == .none)
+        #expect(first.history == [AIChatTurn(user: "When is the launch?", assistant: "The launch is in May.")])
+        #expect(first.prompt.contains("Current page body") && first.prompt.contains("Selected text"))
+        #expect(!first.prompt.contains("Old page body"))
+        #expect(antigravity.requests.last?.history.count == 2)
+        #expect(antigravity.requests.last?.prompt.contains("Current page body") == true)
+        #expect(session.messages[1].modelLabel == "Claude Sonnet")
+        #expect(session.messages[5].modelLabel == "Antigravity")
+
+        session.configure(provider: claude, model: "opus", label: "Claude Opus")
+        session.send("What did we decide?", context: page)
+        await waitUntilIdle(session)
+        let back = try #require(claude.requests.last)
+        #expect(back.resumeSessionID == nil && back.model == "opus")
+        #expect(back.history.count == 3)
+        #expect(back.prompt.contains("Current page body"))
+
+        session.configure(provider: claude, model: "haiku", label: "Claude Haiku")
+        session.send("Can you summarise?", context: page)
+        await waitUntilIdle(session)
+        #expect(claude.requests.last?.resumeSessionID == nil)
+        #expect(claude.requests.last?.history.count == 4)
+
+        session.clear()
+        session.send("New conversation", context: nil)
+        await waitUntilIdle(session)
+        #expect(claude.requests.last?.history.isEmpty == true)
+        #expect(claude.requests.last?.resumeSessionID == nil)
+    }
+
+    @Test func stoppingATurnDoesNotReplayItOrDisruptTheNextProvider() async throws {
+        let ws = try Workspace.temporary()
+        let slow = FakeProvider { _ in
+            try? await Task.sleep(for: .milliseconds(200))
+            return [.finished(AIResult(text: "Do not replay", sessionID: "stale"))]
+        }
+        let next = FakeProvider(supportsWorkspaceTools: false) { _ in [.finished(AIResult(text: "New reply"))] }
+        let session = ChatSession(provider: slow, workspace: ws, server: server)
+        session.send("Stop me", context: nil)
+        for _ in 0..<100 where slow.requests.isEmpty { try? await Task.sleep(for: .milliseconds(2)) }
+        #expect(slow.requests.count == 1)
+        session.stop()
+        session.configure(provider: next, model: "next", label: "Next")
+        session.send("New turn", context: nil)
+        await waitUntilIdle(session)
+
+        #expect(next.requests.first?.history.isEmpty == true)
+        #expect(next.requests.first?.resumeSessionID == nil)
+        #expect(session.messages[1].notice == "Stopped")
+        #expect(session.messages.last?.text == "New reply")
+    }
+
     @Test func failuresBecomeAnActionableNotice() async throws {
         let ws = try Workspace.temporary()
         let provider = FakeProvider { _ in [.finished(.failed(.notSignedIn, "Failed to authenticate"))] }
@@ -305,6 +384,15 @@ private func tempDirectory() throws -> URL {
         let prompt = AIPrompts.chat("summarise", context: PageContext(pageID: "p", title: "Big", markdown: long), includePage: true)
         #expect(prompt.count < 1_000)
         #expect(prompt.contains("get_page"))
+    }
+
+    @Test func longPagesAreTruncatedForProvidersWithoutTools() {
+        let text = String(repeating: "字", count: 30_000)
+        let prompt = AIPrompts.chat("summarise", context: PageContext(pageID: "p", title: "Big", markdown: text),
+                                    includePage: true, workspaceTools: false)
+        #expect(prompt.contains("[Content truncated]"))
+        #expect(!prompt.contains("get_page"))
+        #expect(prompt.utf8.count < 25_000)
     }
 
     @Test func inlinePromptSeparatesInstructionSelectionAndContext() {

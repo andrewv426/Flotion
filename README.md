@@ -6,7 +6,7 @@ A minimal, native notes app for macOS in the style of Notion, built so that LLMs
 - **Native and fast.** SwiftUI and AppKit, no web runtime for the editor. A 5,000-block page opens in under 30 ms.
 - **MCP built in.** A bundled server lets Claude Code, Claude Desktop or any MCP client search, read and edit the workspace.
 - **Diagrams in your notes.** Flow describes a system and how it changes over time. Flotion lays out the nodes and arrows and plays the steps in the page.
-- **An assistant in the app.** A side panel that knows the open page, and "Edit with AI" on selected text. It runs on your Claude subscription through Claude Code; there is no API key.
+- **An assistant in the app.** A side panel that knows the open page, and "Edit with AI" on selected text. Choose Claude, ChatGPT, or Antigravity from the Assistant panel.
 
 ## Diagrams with Flow
 
@@ -80,7 +80,7 @@ To try an example, open the assistant with ⌘J and ask it to insert a diagram i
 
 ## Requirements
 
-macOS 15 or later on Apple Silicon, Xcode 26, and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`). The assistant also needs [Claude Code](https://code.claude.com/docs/en/setup), signed in.
+macOS 15 or later on Apple Silicon, Xcode 26, and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`).
 
 ## Build and run
 
@@ -96,7 +96,19 @@ open .build/xcode/Build/Products/Debug/Flotion.app
 
 ## Connect an LLM
 
-**Inside the app:** open Settings, sign in to Claude, then press ⌘J.
+After signing in to ChatGPT or Antigravity in Settings, Flotion loads the models reported by the installed CLI and adds them to the Assistant picker. Model toggles let you hide choices, and **Check again** refreshes the list. Returning from sign-in also refreshes Settings.
+
+**Inside the app:** install [Claude Code](https://code.claude.com/docs/en/setup), [Codex CLI](https://developers.openai.com/codex/cli), or [Antigravity CLI](https://antigravity.google/docs/install/) for the provider you want to use. Open Settings, select the provider, and enable the models you want in the picker.
+
+- **Claude** uses your Claude Code sign-in.
+- **ChatGPT** uses your Codex CLI sign-in with a ChatGPT account.
+- **Antigravity** uses your Antigravity CLI Google sign-in. Click **Sign in to Antigravity** to complete its browser flow. The picker shows the models Antigravity reports for your account, including the available Gemini reasoning levels.
+
+Use **Check again** in Settings after signing in.
+
+Press ⌘J and choose a model above the composer. All three providers can search, read and edit notes in Assistant chat through Flotion's workspace tools. The reply shows tool activity and offers **Undo** for its edits. **Edit with AI** produces a preview you can apply.
+
+Flotion keeps the open chat in memory. After a model switch, your next message sends the selected provider up to 12 recent completed exchanges (about 16 KB of text), plus the current page and selection. A long page can be fetched with the workspace tools. **New Chat** or quitting Flotion clears the app's transcript. The workspace database keeps a separate change log for Undo. Claude Code and Antigravity CLI may save their own local session files.
 
 ![The assistant panel after an edit](docs/images/assistant-panel.png)
 
@@ -117,7 +129,7 @@ Packages/FlotionKit/
   Sources/FlotionMCP/       MCP tools and transport
   Sources/flotion-mcp/      the MCP server executable
   Sources/FlotionEditor/    view-free editing rules
-  Sources/FlotionAI/        Claude Code provider, chat session
+  Sources/FlotionAI/        Assistant providers and chat session
   Tests/                    unit, contract and budget tests
 Scripts/                    verify.sh, selftest.sh, perftest.sh
 Spikes/                     the two timing experiments the design rests on

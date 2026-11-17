@@ -86,7 +86,7 @@ final class AppModel {
     func sendChat(_ text: String) async {
         guard let ai else { return }
         await flush()
-        ai.chat.send(text, context: pageContext())
+        ai.send(text, context: pageContext())
     }
 
     /// Opens the panel and sends (used by "Turn into a diagram").
@@ -270,7 +270,7 @@ final class AppModel {
 
             ## Connect an AI
 
-            - [ ] Open Settings and connect Claude
+            - [ ] Open Settings and connect an Assistant model
             - [ ] Ask it to add a step-by-step diagram to a page
 
             ---

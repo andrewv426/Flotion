@@ -1,82 +1,12 @@
 import Foundation
 
-/// A running `claude -p` child with line-buffered output.
-final class ClaudeProcess: @unchecked Sendable {
-    private let process = Process()
-    private let input = Pipe()
-    private let output = Pipe()
-    private let lock = NSLock()
-    private var pending = Data()
-    private var backlog: [Data] = []
-    private var ended = false
-    private var sink: (@Sendable (Data?) -> Void)?
-
-    init(executable: URL, arguments: [String], workingDirectory: URL, environment: [String: String]) throws {
-        process.executableURL = executable
-        process.arguments = arguments
-        process.currentDirectoryURL = workingDirectory
-        process.environment = environment
-        process.standardInput = input
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            self?.ingest(handle.availableData)
-        }
-        try process.run()
-    }
-
-    private func ingest(_ data: Data) {
-        lock.lock()
-        defer { lock.unlock() }
-        if data.isEmpty {
-            guard !ended else { return }
-            ended = true
-            output.fileHandleForReading.readabilityHandler = nil
-            sink?(nil)
-            return
-        }
-        pending.append(data)
-        while let newline = pending.firstIndex(of: 0x0A) {
-            let line = pending.subdata(in: pending.startIndex..<newline)
-            pending.removeSubrange(pending.startIndex...newline)
-            guard !line.isEmpty else { continue }
-            if let sink { sink(line) } else { backlog.append(line) }
-        }
-    }
-
-    /// Starts delivering lines (nil marks the end of output). Lines read before this call are replayed first.
-    func attach(_ sink: @escaping @Sendable (Data?) -> Void) {
-        lock.lock()
-        defer { lock.unlock() }
-        self.sink = sink
-        backlog.forEach(sink)
-        backlog.removeAll()
-        if ended { sink(nil) }
-    }
-
-    func send(_ data: Data) {
-        try? input.fileHandleForWriting.write(contentsOf: data)
-    }
-
-    /// Closing stdin tells the CLI there are no more turns, and it exits.
-    func closeInput() {
-        try? input.fileHandleForWriting.close()
-    }
-
-    func terminate() {
-        closeInput()
-        if process.isRunning { process.terminate() }
-    }
-
-    var isRunning: Bool { process.isRunning }
-}
-
 /// Runs requests through the user's installed Claude Code, on their subscription login.
 public final class ClaudeCodeProvider: AIProvider, @unchecked Sendable {
     public let executable: URL?
+    public let supportsWorkspaceTools = true
     private let workingDirectory: URL
     private let lock = NSLock()
-    private var spare: (arguments: [String], process: ClaudeProcess)?
+    private var spare: (arguments: [String], process: AIProcess)?
 
     /// - Parameter workingDirectory: an empty folder; the model has no file tools, and this
     ///   also keeps any project-level configuration out of reach.
@@ -92,9 +22,9 @@ public final class ClaudeCodeProvider: AIProvider, @unchecked Sendable {
         await ClaudeCLI.status(executable: executable)
     }
 
-    private func launch(_ arguments: [String]) throws -> ClaudeProcess {
+    private func launch(_ arguments: [String]) throws -> AIProcess {
         guard let executable else { throw CocoaError(.fileNoSuchFile) }
-        return try ClaudeProcess(executable: executable, arguments: arguments, workingDirectory: workingDirectory,
+        return try AIProcess(executable: executable, arguments: arguments, workingDirectory: workingDirectory,
                                  environment: ClaudeCLI.childEnvironment())
     }
 
@@ -109,7 +39,7 @@ public final class ClaudeCodeProvider: AIProvider, @unchecked Sendable {
         spare = (try? launch(arguments)).map { (arguments, $0) }
     }
 
-    private func takeSpare(_ arguments: [String]) -> ClaudeProcess? {
+    private func takeSpare(_ arguments: [String]) -> AIProcess? {
         lock.lock()
         defer { lock.unlock() }
         guard let current = spare, current.arguments == arguments, current.process.isRunning else { return nil }
@@ -125,7 +55,7 @@ public final class ClaudeCodeProvider: AIProvider, @unchecked Sendable {
                 return
             }
             let arguments = ClaudeCLI.arguments(for: request)
-            let process: ClaudeProcess
+            let process: AIProcess
             do {
                 process = try takeSpare(arguments) ?? launch(arguments)
             } catch {
@@ -147,7 +77,7 @@ public final class ClaudeCodeProvider: AIProvider, @unchecked Sendable {
                     if case .finished = event { process.closeInput() }
                 }
             }
-            process.send(ClaudeCLI.userMessage(request.prompt))
+            process.send(ClaudeCLI.userMessage(request.promptWithHistory))
             continuation.onTermination = { _ in process.terminate() }
         }
     }

@@ -30,6 +30,8 @@ final class InlineEditModel {
 
     /// True when there is no selection: the request writes new content instead of rewriting.
     var isGenerating: Bool { selection.isEmpty }
+    var canCreateDiagram: Bool { ai.provider.supportsWorkspaceTools }
+    var modelLabel: String { ai.selectedModel.label }
 
     func prewarm() {
         ai.provider.prewarm(ai.inlineRequest(prompt: ""))
@@ -56,10 +58,8 @@ final class InlineEditModel {
                 case .finished(let result):
                     if let failure = result.failure {
                         let message = switch failure {
-                        case .notInstalled: "Claude Code is not installed."
-                        case .notSignedIn: "Claude is signed out."
-                        case .rateLimited: "You have reached your plan's usage limit for now."
-                        case .other: result.message ?? "The request failed."
+                        case .rateLimited: "You have reached your provider’s usage limit for now."
+                        default: result.message ?? "The request failed."
                         }
                         self.phase = .failed(message: message, needsSignIn: failure == .notSignedIn || failure == .notInstalled)
                     } else {
@@ -103,6 +103,7 @@ struct InlineEditView: View {
         VStack(alignment: .leading, spacing: 10) {
             switch model.phase {
             case .idle:
+                Text(model.modelLabel).font(.caption).foregroundStyle(.secondary)
                 prompt
                 if !model.isGenerating { presets }
             case .running, .done:
@@ -137,7 +138,7 @@ struct InlineEditView: View {
     private var prompt: some View {
         HStack(spacing: 8) {
             Image(systemName: "sparkles").foregroundStyle(.secondary)
-            TextField(model.isGenerating ? "What should Claude write?" : "How should Claude change this?", text: $draft)
+            TextField(model.isGenerating ? "What should the assistant write?" : "How should the assistant change this?", text: $draft)
                 .textFieldStyle(.plain)
                 .font(.system(size: 14))
                 .focused($focused)
@@ -154,7 +155,7 @@ struct InlineEditView: View {
                     }
                 }
             }
-            Button("Turn into a diagram", action: onDiagram)
+            if model.canCreateDiagram { Button("Turn into a diagram", action: onDiagram) }
         }
         .controlSize(.small)
     }
