@@ -19,7 +19,15 @@ git worktree add .worktrees/<name> -b <type>/<name> origin/main
 
 ## Testing without getting in the user's way
 
-The user keeps working on this Mac while tests run, so test in the background by default:
+Use the `flotion-test` Tart macOS VM for foreground and live-model tests. The guest has its own desktop, so Flotion can take keyboard focus there while the user keeps working on the host.
+
+```bash
+~/.local/bin/tart run flotion-test --no-graphics --no-audio --no-usb-accessories --no-clipboard
+```
+
+Copy the revision under test into the guest with `tart exec -i` and a Git archive. Build and run Flotion in the guest with a fresh `FLOTION_DB` and synthetic notes. Use no host directory shares, and sign in to model CLIs inside the guest. For focus-dependent checks, run the foreground self-test in the guest desktop session. Include the tested revision, the providers exercised, and any skipped checks in the PR.
+
+When testing on the host, run in the background by default:
 
 - `swift test` and `./Scripts/verify.sh`, including `--ui`, show nothing on screen. The in-app tests run in background mode: no Dock icon, transparent off-screen windows that ignore the mouse, the app never takes focus, and it uses its own preferences (`app.flotion.Flotion.tests`), never the user's.
 - Ask first before anything that takes over the screen, mouse or keyboard: `FLOTION_FOREGROUND=1`, computer use, or launching the app normally.
