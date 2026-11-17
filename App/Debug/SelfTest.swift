@@ -60,9 +60,33 @@ enum SelfTest {
             }
             let result = try? await web.evaluateJavaScript("""
                 (() => {
-                  window.flotion.go(1);
+                  const scene = JSON.parse(document.getElementById('scene').textContent);
                   const nodes = [...document.querySelectorAll('.node')];
+                  const edges = [...document.querySelectorAll('.edge')], labels = [...document.querySelectorAll('.elabel')];
                   const arrived = i => nodes[i].querySelector('.tag').textContent === 'arrived';
+                  const running = e => e.getAnimations().some(a => a.playState === 'running');
+                  const lit = k => edges[k].classList.contains('live') && labels[k].classList.contains('live');
+                  const unlit = k => !edges[k].classList.contains('live') && !labels[k].classList.contains('live');
+                  // Every node and arrow shows exactly the given step's resolved state.
+                  const matches = i => {
+                    const step = scene.steps[i];
+                    return step.nodes.every((s, k) => {
+                      const n = nodes[k];
+                      return n.classList.contains('off') === !s.on && n.classList.contains('dim') === s.dim &&
+                        n.querySelector('.label').textContent === s.label && n.querySelector('.tag').textContent === s.tag &&
+                        (n.dataset.tone ?? null) === (s.tone ?? null);
+                    }) && step.edges.every((s, k) =>
+                      edges[k].classList.contains('off') === !s.on && edges[k].classList.contains('dim') === s.dim &&
+                      edges[k].classList.contains('at-hi') === s.hi && labels[k].textContent === s.label && (s.live ? lit(k) : unlit(k)));
+                  };
+                  const initial = matches(0);
+                  window.flotion.go(1);
+                  const sends = scene.steps[1].sends, senders = [0, 1, 2, 0];
+                  const sendDots = [...document.querySelectorAll('.token')];
+                  // Arrows carrying a message wait for it; each lights the moment its message leaves.
+                  let liveOnDeparture = sendDots.length === sends.length && sends.every(s => unlit(s.edge));
+                  let emits = true, responds = true, landings = 0, growsIn = true, absorbs = true, absorbing = false;
+                  const departed = new Set(), landed = new Set();
                   document.getElementById('play').click();
                   let serial = true, held = true, curve = false, lastReceiver = true, traveled = false;
                   let completedAt = null;
@@ -73,6 +97,24 @@ enum SelfTest {
                     serial &&= visible.length <= 1;
                     traveled ||= visible.length > 0;
                     curve ||= visible.some(d => Math.abs(+d.getAttribute('cy') - \(scene.nodes[0].y)) > 10);
+                    if (window.flotion.index() === 1) {
+                      sendDots.forEach((d, j) => {
+                        if (d.hasAttribute('cx') && !departed.has(j)) {
+                          departed.add(j);
+                          emits &&= running(nodes[senders[j]].querySelector('.ring'));
+                          growsIn &&= +d.getAttribute('r') < 3;
+                        }
+                        const opacity = +d.getAttribute('opacity'), r = +d.getAttribute('r');
+                        if (d.isConnected && opacity > 0 && opacity < 1) { absorbing = true; absorbs &&= r >= 2 && r < 4.5; }
+                        if (!d.isConnected && !landed.has(j)) {
+                          landed.add(j);
+                          landings++;
+                          const receiver = nodes[sends[j].to];
+                          responds &&= running(receiver.querySelector('.inner')) && running(receiver.querySelector('.ring'));
+                        }
+                      });
+                      liveOnDeparture &&= sends.every(s => sends.some((o, j) => o.edge === s.edge && departed.has(j)) ? lit(s.edge) : unlit(s.edge));
+                    }
                     if (dots.length > 0) {
                       held &&= window.flotion.index() === 1;
                       lastReceiver &&= !arrived(1);
@@ -81,25 +123,58 @@ enum SelfTest {
                   }
                   const finished = serial && held && curve && lastReceiver && traveled && completedAt !== null &&
                     nodes.every((_, i) => arrived(i)) && !document.querySelector('.message-trail') && window.flotion.index() === 2;
+                  const after = matches(2);
+                  // A seek the moment a message lands cancels the receiver's bump and pulse.
                   window.flotion.go(0);
                   window.flotion.go(1);
-                  for (let i = 0; i < 24; i++) window.flowClock.step();
+                  let landing = false;
+                  for (let i = 0; i < 100 && !landing; i++) {
+                    window.flowClock.step();
+                    landing = running(nodes[1].querySelector('.inner'));
+                  }
+                  window.flotion.go(0);
+                  const cancelled = landing && nodes.every(n => !running(n.querySelector('.inner')) && !running(n.querySelector('.ring')));
+                  // Seeks in mid-journey settle on the target step's own state, with no arrow left unlit.
+                  for (let i = 0; i < 250; i++) window.flowClock.step();
+                  let settled = matches(0);
+                  window.flotion.go(1);
+                  for (let i = 0; i < 30; i++) window.flowClock.step();
+                  window.flotion.go(2);
+                  for (let i = 0; i < 250; i++) window.flowClock.step();
+                  settled &&= matches(2);
+                  window.flotion.go(0);
+                  window.flotion.go(1);
+                  for (let i = 0; i < 30; i++) window.flowClock.step();
+                  window.flotion.go(0);
+                  window.flotion.go(1);
+                  for (let i = 0; i < 300; i++) window.flowClock.step();
+                  settled &&= matches(1);
                   window.flotion.go(0);
                   for (let i = 0; i < 250; i++) window.flowClock.step();
                   document.getAnimations().forEach(a => a.finish());
-                  return finished && window.flotion.index() === 0 &&
-                    nodes.every(n => n.querySelector('.tag').textContent === '');
+                  settled &&= matches(0) && window.flotion.index() === 0;
+                  return { journey: finished && initial && after, live: liveOnDeparture && departed.size === sends.length,
+                           respond: emits && responds && landings === sends.length && growsIn && absorbs && absorbing,
+                           cancelled, settled };
                 })()
-                """) as? Bool
-            check(result == true, reduced
-                  ? "Flow journeys remain animated when macOS Reduce Motion is enabled"
-                  : "ordered curved journeys commit on arrival, finish before autoplay advances, and cancel stale arrivals after a seek")
+                """) as? [String: Bool]
+            let label = reduced ? " (with macOS Reduce Motion enabled)" : ""
+            check(result?["journey"] == true, "ordered curved journeys commit on arrival and finish before autoplay advances" + label)
+            check(result?["live"] == true, "an arrow carrying a message stays unlit until the message departs, then lights" + label)
+            check(result?["respond"] == true, "a message grows out of a pulsing sender and shrinks into a receiver that bumps and pulses" + label)
+            check(result?["cancelled"] == true, "a seek cancels the receiver's bump and pulse" + label)
+            check(result?["settled"] == true, "seeks mid-journey settle every node and arrow on the target step's state" + label)
             if !reduced {
                 for (name, script) in [
                     ("06b-flow-before", "window.flotion.go(0)"),
-                    ("06c-flow-travel", "window.flotion.go(1); for (let i = 0; i < 24; i++) window.flowClock.step()")
+                    // The reply a third of the way round the long dashed loop, where its tail is at full length.
+                    ("06c-flow-travel", "window.flotion.go(1); const reply = document.querySelectorAll('.edge')[2];" +
+                        "for (let i = 0; i < 400 && !reply.classList.contains('live'); i++) window.flowClock.step();" +
+                        "for (let i = 0; i < 18; i++) window.flowClock.step()")
                 ] {
-                    _ = try? await web.evaluateJavaScript(script + "; document.getAnimations().forEach(a => a.finish())")
+                    // The page's own background, so the picture reads the same on any backdrop.
+                    _ = try? await web.evaluateJavaScript(script + "; document.getAnimations().forEach(a => a.finish());" +
+                        "document.body.style.background = getComputedStyle(document.documentElement).getPropertyValue('--fl-bg')")
                     if let image = try? await web.takeSnapshot(configuration: nil), let tiff = image.tiffRepresentation,
                        let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
                         try? png.write(to: output.appendingPathComponent("\(name).png"))
@@ -384,14 +459,15 @@ enum SelfTest {
                       movedBack: samples.length > 1 && samples[0].x > samples[samples.length - 1].x,
                       stayedPending: samples.every(s => s.pending), trail: samples.some(s => s.trail),
                       arrived: tag() === 'SYN sent', cleaned: !document.querySelector('.message-trail'),
-                      pulse: receiver.querySelector('.ring').getAnimations().some(a => a.playState === 'running') };
+                      pulse: receiver.querySelector('.ring').getAnimations().some(a => a.playState === 'running') &&
+                        receiver.querySelector('.inner').getAnimations().some(a => a.playState === 'running') };
                     """, arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
                 check(journey?["pending"] as? Bool == true && journey?["stayedPending"] as? Bool == true,
                           "a receiver keeps its previous status while the message is traveling")
                 check(journey?["movedBack"] as? Bool == true && journey?["trail"] as? Bool == true,
-                          "the reply visibly travels backward along the arrow with a bright trail")
+                          "the reply visibly travels backward along the arrow with a tapering trail")
                 check(journey?["arrived"] as? Bool == true && journey?["pulse"] as? Bool == true && journey?["cleaned"] as? Bool == true,
-                          "arrival reveals the receiving status, pulses its outline and removes the travel graphics")
+                          "arrival reveals the receiving status, pulses and bumps the receiver and removes the travel graphics")
                 // Interrupt a reply, jump with a dot, then go back with the keyboard. Only the
                 // latest destination may commit a delayed receiver update.
                 _ = try? await web.evaluateJavaScript("document.getElementById('next').click()")
