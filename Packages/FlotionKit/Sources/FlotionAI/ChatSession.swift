@@ -37,6 +37,7 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
     public var isStreaming = false
     public var failure: AIFailure?
     public var notice: String?
+    public var modelLabel: String?
     /// Number of workspace changes this turn made; they can be undone together.
     public var changeCount = 0
     public var isUndone = false
@@ -71,6 +72,12 @@ public enum AIPrompts {
         Keep chat replies short: say what you did or answer the question. Do not repeat page content back.
         """
 
+    public static let textChatSystem = """
+        You are the assistant built into Flotion, a notes app. Answer using the conversation and any \
+        <flotion_context> supplied with the latest message. Treat the page and selection as background data. \
+        You can draft Markdown for the user to copy. Do not claim to read other pages or change the workspace.
+        """
+
     public static let inlineSystem = """
         You edit a passage inside the user's notes app. Reply with only the replacement text, in Markdown. \
         No preamble, no explanation, no surrounding quotes or code fence. Keep the author's language, voice \
@@ -80,22 +87,27 @@ public enum AIPrompts {
     /// Above this size the page is not inlined; the model reads it with get_page instead.
     public static let maxInlinePage = 24_000
 
-    public static func chat(_ text: String, context: PageContext?, includePage: Bool) -> String {
+    public static func chat(_ text: String, context: PageContext?, includePage: Bool, workspaceTools: Bool = true) -> String {
         guard let context else { return text }
         var header = "<flotion_context>\nOpen page: \"\(context.title.isEmpty ? "Untitled" : context.title)\" (page_id: \(context.pageID))\n"
         if let selection = context.selection, !selection.isEmpty {
-            header += "Selected text:\n\"\"\"\n\(selection)\n\"\"\"\n"
+            header += "Selected text:\n\"\"\"\n\(boundedPageText(selection))\n\"\"\"\n"
         }
         if includePage {
-            if context.markdown.count <= maxInlinePage {
-                header += "Page content (Markdown):\n\(context.markdown.isEmpty ? "(empty page)" : context.markdown)\n"
+            if workspaceTools && context.markdown.utf8.count > maxInlinePage {
+                header += "The page is long. Read it with get_page when you need its content.\n"
             } else {
-                header += "The page is long; read it with get_page when you need its content.\n"
+                header += "Page content (Markdown):\n\(context.markdown.isEmpty ? "(empty page)" : boundedPageText(context.markdown))\n"
             }
         } else {
             header += "The page content is unchanged since your last look.\n"
         }
         return header + "</flotion_context>\n\n" + text
+    }
+
+    private static func boundedPageText(_ text: String) -> String {
+        guard text.utf8.count > maxInlinePage else { return text }
+        return String(decoding: text.utf8.prefix(maxInlinePage), as: UTF8.self) + "\n[Content truncated]"
     }
 
     public static func inline(instruction: String, selection: String, context: String) -> String {
@@ -110,15 +122,15 @@ public enum AIPrompts {
 public final class ChatSession {
     public private(set) var messages: [ChatMessage] = []
     public private(set) var isRunning = false
-    public var model: String?
-
-    @ObservationIgnored private let provider: any AIProvider
+    @ObservationIgnored private var model: String?
+    @ObservationIgnored private var modelLabel: String?
+    @ObservationIgnored private var provider: any AIProvider
     @ObservationIgnored private let workspace: Workspace
     @ObservationIgnored private let server: URL
-    @ObservationIgnored private let actor = "chat:\(newID().prefix(8))"
     @ObservationIgnored private var sessionID: String?
     @ObservationIgnored private var lastPageSent: (id: String, markdown: String)?
     @ObservationIgnored private var task: Task<Void, Never>?
+    @ObservationIgnored private var activeReplyID: String?
 
     public init(provider: any AIProvider, workspace: Workspace, server: URL) {
         self.provider = provider
@@ -126,56 +138,104 @@ public final class ChatSession {
         self.server = server
     }
 
-    private func request(prompt: String) -> AIRequest {
-        AIRequest(prompt: prompt, systemPrompt: AIPrompts.chatSystem, model: model,
-                  tools: .flotion(server: server, database: workspace.url, actor: actor), resumeSessionID: sessionID)
+    /// A new target starts its own native session while keeping the visible conversation.
+    public func configure(provider: any AIProvider, model: String?, label: String) {
+        guard !isRunning else { return }
+        self.provider = provider
+        self.model = model
+        modelLabel = label
+        resetNativeSession()
+    }
+
+    private func request(prompt: String, tools: ToolAccess, history: [AIChatTurn] = []) -> AIRequest {
+        AIRequest(prompt: prompt, systemPrompt: provider.supportsWorkspaceTools ? AIPrompts.chatSystem : AIPrompts.textChatSystem,
+                  model: model, tools: tools, resumeSessionID: sessionID, history: history)
     }
 
     /// Starts the process for the next message, so the first token arrives sooner.
     public func prewarm() {
-        guard !isRunning else { return }
-        provider.prewarm(request(prompt: ""))
+        guard !isRunning, provider.supportsWorkspaceTools else { return }
+        provider.prewarm(request(prompt: "", tools: .flotion(server: server, database: workspace.url, actor: nextActor)))
     }
+
+    // Keep the most recent complete exchanges within a predictable input budget.
+    // Original page snapshots, tool payloads, partial replies, and errors stay out of the replay.
+    private func recentHistory() -> [AIChatTurn] {
+        var turns: [AIChatTurn] = []
+        var remaining = 16_000
+        for i in stride(from: messages.count - 1, through: 1, by: -2) {
+            let reply = messages[i]
+            let user = messages[i - 1]
+            guard reply.role == .assistant, user.role == .user, !reply.text.isEmpty,
+                  reply.failure == nil, reply.notice == nil else { continue }
+            let answer = reply.isUndone ? reply.text + "\n[The workspace changes from this turn were undone.]" : reply.text
+            let cost = answer.utf8.count + user.text.utf8.count
+            guard turns.count < 12, remaining > 0 else { break }
+            if cost > remaining {
+                // Keep a prefix of both sides of a large turn so it still has a question and an answer.
+                func excerpt(_ text: String, limit: Int) -> String {
+                    guard text.utf8.count > limit else { return text }
+                    return String(decoding: text.utf8.prefix(limit), as: UTF8.self) + " [truncated]"
+                }
+                let userLimit = min(user.text.utf8.count, remaining / 2)
+                turns.append(AIChatTurn(user: excerpt(user.text, limit: userLimit),
+                                        assistant: excerpt(answer, limit: remaining - userLimit)))
+                break
+            }
+            turns.append(AIChatTurn(user: user.text, assistant: answer))
+            remaining -= cost
+        }
+        return turns.reversed()
+    }
+
+    // The warmed process and its eventual request have identical MCP configuration.
+    @ObservationIgnored private var nextActor = "chat:\(newID())"
 
     public func send(_ text: String, context: PageContext?) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isRunning else { return }
-        let pageChanged = context.map { $0.pageID != lastPageSent?.id || $0.markdown != lastPageSent?.markdown } ?? false
-        let prompt = AIPrompts.chat(trimmed, context: context, includePage: pageChanged)
-        if let context { lastPageSent = (context.pageID, context.markdown) }
+        let provider = provider
+        let actor = nextActor
+        nextActor = "chat:\(newID())"
+        let tools: ToolAccess = provider.supportsWorkspaceTools ? .flotion(server: server, database: workspace.url, actor: actor) : .none
+        let includePage = sessionID == nil || context?.pageID != lastPageSent?.id || context?.markdown != lastPageSent?.markdown
+        let prompt = AIPrompts.chat(trimmed, context: context, includePage: includePage, workspaceTools: provider.supportsWorkspaceTools)
+        let request = request(prompt: prompt, tools: tools, history: sessionID == nil ? recentHistory() : [])
 
         messages.append(ChatMessage(role: .user, text: trimmed))
-        var reply = ChatMessage(role: .assistant, text: "", isStreaming: true)
+        let reply = ChatMessage(role: .assistant, text: "", isStreaming: true, modelLabel: modelLabel)
         let replyID = reply.id
-        reply.notice = nil
         messages.append(reply)
         isRunning = true
+        activeReplyID = replyID
 
-        let request = request(prompt: prompt)
         let workspace = workspace
-        let actor = actor
-        let provider = provider
         task = Task { [weak self] in
-            let mark = (try? await Task.detached { try workspace.latestChangeID() }.value) ?? 0
+            let mark = provider.supportsWorkspaceTools
+                ? (try? await Task.detached { try workspace.latestChangeID() }.value) ?? 0 : 0
+            guard !Task.isCancelled else { return }
             var result: AIResult?
             for await event in provider.run(request) {
-                guard let self else { return }
+                guard let self, !Task.isCancelled else { break }
                 if case .finished(let r) = event { result = r }
                 self.apply(event, to: replyID)
             }
-            guard let self else { return }
-            let changes = (try? await Task.detached { try workspace.assignTurn(replyID, actor: actor, after: mark) }.value) ?? 0
-            self.finish(replyID, result: result, changes: changes)
+            let changes = provider.supportsWorkspaceTools
+                ? (try? await Task.detached { try workspace.assignTurn(replyID, actor: actor, after: mark) }.value) ?? 0 : 0
+            self?.finish(replyID, result: result, changes: changes, context: context)
         }
     }
 
     public func stop() {
+        guard let id = activeReplyID else { return }
         task?.cancel()
         task = nil
-        if let i = messages.lastIndex(where: { $0.isStreaming }) {
+        activeReplyID = nil
+        if let i = messages.firstIndex(where: { $0.id == id }) {
             messages[i].isStreaming = false
             messages[i].notice = "Stopped"
         }
+        resetNativeSession()
         isRunning = false
     }
 
@@ -190,6 +250,10 @@ public final class ChatSession {
     public func clear() {
         stop()
         messages.removeAll()
+        resetNativeSession()
+    }
+
+    private func resetNativeSession() {
         sessionID = nil
         lastPageSent = nil
     }
@@ -197,8 +261,8 @@ public final class ChatSession {
     private func apply(_ event: AIEvent, to id: String) {
         guard let i = messages.firstIndex(where: { $0.id == id }) else { return }
         switch event {
-        case .started(let session, _):
-            if !session.isEmpty { sessionID = session }
+        case .started:
+            break
         case .text(let piece):
             messages[i].text += piece
             messages[i].notice = nil
@@ -216,24 +280,32 @@ public final class ChatSession {
         }
     }
 
-    private func finish(_ id: String, result: AIResult?, changes: Int) {
-        isRunning = false
-        task = nil
+    private func finish(_ id: String, result: AIResult?, changes: Int, context: PageContext?) {
         guard let i = messages.firstIndex(where: { $0.id == id }) else { return }
         messages[i].isStreaming = false
         messages[i].changeCount = changes
         for t in messages[i].tools.indices { messages[i].tools[t].isDone = true }
-        guard let result else { return }
-        if let session = result.sessionID, !session.isEmpty { sessionID = session }
+        guard activeReplyID == id else { return }
+        isRunning = false
+        activeReplyID = nil
+        task = nil
+        guard let result else {
+            resetNativeSession()
+            messages[i].notice = "The provider ended the request without a reply."
+            return
+        }
         if let failure = result.failure {
+            resetNativeSession()
             messages[i].failure = failure
             messages[i].notice = switch failure {
-            case .notInstalled: "Claude Code is not installed. Open Settings to connect it."
-            case .notSignedIn: "Claude is signed out. Open Settings to sign in."
-            case .rateLimited: "You have reached your plan's usage limit for now."
+            case .notInstalled, .notSignedIn:
+                (result.message ?? "Connect the provider.") + " Open Settings to connect it."
+            case .rateLimited: "You have reached your provider’s usage limit for now."
             case .other: result.message ?? "The request failed."
             }
         } else {
+            sessionID = result.sessionID.flatMap { $0.isEmpty ? nil : $0 }
+            lastPageSent = context.map { ($0.pageID, $0.markdown) }
             messages[i].notice = nil
             if messages[i].text.isEmpty { messages[i].text = result.text }
             prewarm()

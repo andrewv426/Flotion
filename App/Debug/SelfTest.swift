@@ -3,6 +3,7 @@ import AppKit
 import FlotionAI
 import FlotionCore
 import FlotionEditor
+import SwiftUI
 import WebKit
 
 /// An in-process UI smoke test, run with `FLOTION_SELFTEST=<output dir>`.
@@ -58,8 +59,8 @@ enum SelfTest {
                                                charactersIgnoringModifiers: character, isARepeat: false, keyCode: code) else { return }
             table.keyDown(with: event)
         }
-        func snapshot(_ name: String) {
-            guard let view = window()?.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+        func snapshot(_ name: String, view explicitView: NSView? = nil) {
+            guard let view = explicitView ?? window()?.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
                 failures.append("no window to snapshot for \(name)")
                 return
             }
@@ -346,8 +347,10 @@ enum SelfTest {
             }
         }
 
-        // The assistant (a scripted provider stands in for Claude; see AIController.fakeProvider).
+        // Scripted providers exercise the same model selection as the real Assistant.
         if let ai = model.ai {
+            ai.setEnabled(true, for: .claudeDefault)
+            ai.selectModel(AssistantModel.claudeDefault.id)
             await ai.refreshStatus()
             check(ai.status == .ready(plan: "test"), "the assistant reports ready")
             ai.isPanelOpen = true
@@ -368,6 +371,35 @@ enum SelfTest {
                 await ai.chat.undo(reply.id)
                 await waitFor { (model.editor?.blocks.count ?? 0) == before }
                 check(model.editor?.blocks.count == before, "Undo on the reply removes its change from the page")
+            }
+
+            if let openAI = AssistantModel.suggested.first(where: { $0.service == .openAI }) {
+                ai.setEnabled(false, for: openAI)
+                check(!ai.visibleModels.contains(openAI), "a hidden model is absent from the picker")
+                ai.setEnabled(true, for: openAI)
+                ai.selectModel(openAI.id)
+                let restored = AIController(workspace: ai.workspace)
+                check(restored.selectedModel == openAI && restored.visibleModels.contains(openAI), "model choice and visibility persist")
+                await model.sendChat("What did we just discuss?")
+                await waitFor { !ai.chat.isRunning && ai.chat.messages.count == 4 }
+                let followUp = ai.chat.messages.last
+                check(followUp?.text == "An answer from the selected model." && followUp?.modelLabel == openAI.label,
+                      "the follow-up uses the selected provider in the same chat")
+                check(followUp?.tools.isEmpty == true && followUp?.changeCount == 0, "a text provider cannot change the workspace")
+                await pause(150)
+                snapshot("08b-assistant-model-switch")
+                let settingsWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 580),
+                                              styleMask: [.borderless], backing: .buffered, defer: false)
+                let settings = NSHostingView(rootView: SettingsView(model: model))
+                settingsWindow.contentView = settings
+                settings.layoutSubtreeIfNeeded()
+                await pause(150)
+                snapshot("08c-assistant-model-settings", view: settings)
+                ai.setEnabled(false, for: openAI)
+                check(ai.selectedModel == .claudeDefault && !ai.visibleModels.contains(openAI),
+                      "hiding the active model selects an available model")
+            } else {
+                check(false, "the OpenAI model is available in Settings")
             }
 
             // Edit with AI on a selection.

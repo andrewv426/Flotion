@@ -270,7 +270,7 @@ final class AppModel {
 
             ## Connect an AI
 
-            - [ ] Open Settings and connect Claude
+            - [ ] Open Settings and connect an Assistant model
             - [ ] Ask it to add a step-by-step diagram to a page
 
             ---

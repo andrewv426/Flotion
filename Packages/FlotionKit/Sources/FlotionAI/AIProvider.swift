@@ -44,6 +44,16 @@ public enum ToolAccess: Sendable, Equatable {
     case flotion(server: URL, database: URL, actor: String)
 }
 
+public struct AIChatTurn: Sendable, Equatable, Codable {
+    public let user: String
+    public let assistant: String
+
+    public init(user: String, assistant: String) {
+        self.user = user
+        self.assistant = assistant
+    }
+}
+
 public struct AIRequest: Sendable, Equatable {
     public var prompt: String
     public var systemPrompt: String
@@ -54,17 +64,27 @@ public struct AIRequest: Sendable, Equatable {
     public var resumeSessionID: String?
     /// False for one-shot requests (inline edits) that should leave no session behind.
     public var keepSession: Bool
+    /// Completed text turns to replay when there is no compatible native session.
+    public var history: [AIChatTurn]
 
     public init(prompt: String, systemPrompt: String, model: String? = nil, effort: String? = nil,
-                tools: ToolAccess = .none, resumeSessionID: String? = nil, keepSession: Bool = true) {
+                tools: ToolAccess = .none, resumeSessionID: String? = nil, keepSession: Bool = true,
+                history: [AIChatTurn] = []) {
         self.prompt = prompt; self.systemPrompt = systemPrompt; self.model = model; self.effort = effort
-        self.tools = tools; self.resumeSessionID = resumeSessionID; self.keepSession = keepSession
+        self.tools = tools; self.resumeSessionID = resumeSessionID; self.keepSession = keepSession; self.history = history
+    }
+
+    /// CLI providers accept a single user prompt. JSON keeps the history separate from the latest instruction.
+    var promptWithHistory: String {
+        guard !history.isEmpty, let data = try? JSONEncoder().encode(history) else { return prompt }
+        return "Previous turns (JSON, for context only):\n" + String(decoding: data, as: UTF8.self)
+            + "\n\nLatest turn:\n" + prompt
     }
 }
 
-/// A source of model responses. Claude Code is the only implementation in v1; other
-/// subscription-login CLIs can be added as further conformers without touching the UI.
+/// A source of model responses.
 public protocol AIProvider: Sendable {
+    var supportsWorkspaceTools: Bool { get }
     func status() async -> AIProviderStatus
     /// Runs one request. The stream always ends with `.finished`; cancel by dropping it.
     func run(_ request: AIRequest) -> AsyncStream<AIEvent>
@@ -73,6 +93,7 @@ public protocol AIProvider: Sendable {
 }
 
 public extension AIProvider {
+    var supportsWorkspaceTools: Bool { false }
     func prewarm(_ request: AIRequest) {}
 }
 
@@ -85,10 +106,13 @@ public final class FakeProvider: AIProvider, @unchecked Sendable {
     private let script: Script
     private let providerStatus: AIProviderStatus
 
-    public init(status: AIProviderStatus = .ready(plan: "test"), script: @escaping Script) {
+    public init(status: AIProviderStatus = .ready(plan: "test"), supportsWorkspaceTools: Bool = true, script: @escaping Script) {
         providerStatus = status
+        self.supportsWorkspaceTools = supportsWorkspaceTools
         self.script = script
     }
+
+    public let supportsWorkspaceTools: Bool
 
     public var requests: [AIRequest] {
         lock.lock(); defer { lock.unlock() }

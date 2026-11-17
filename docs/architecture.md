@@ -2,7 +2,7 @@
 
 One rule shapes the layout: **all data logic lives in `FlotionCore`, and everything else goes through it.** The app, the MCP server and the in-app assistant are three clients of the same code, so anything the UI can do to a page an LLM can do through the same path.
 
-The in-app assistant is not a second integration. It is the user's own Claude Code, started as a subprocess with only `flotion-mcp` attached: the same server external clients use.
+The Assistant routes requests to the model selected in Flotion. Claude Code uses the same `flotion-mcp` server as external clients. OpenAI, Gemini, Grok, and Cursor receive text context and can generate inline edits for the user to apply.
 
 ```mermaid
 flowchart TB
@@ -15,6 +15,8 @@ flowchart TB
 
     cli["claude CLI<br/>the user's own install,<br/>signed in with their subscription"]
     anthropic(["Anthropic"])
+    chatAPI(["OpenAI · Gemini · Grok APIs"])
+    cursor["Cursor CLI in Ask mode"]
     external["External MCP clients<br/>Claude Code, Claude Desktop, others"]
     mcp["flotion-mcp<br/>Swift CLI inside the .app<br/>pages · blocks · search · diagrams"]
 
@@ -29,6 +31,8 @@ flowchart TB
     editor --> editorlib
     panel --> ai
     ai -- "spawns · stream-json over pipes" --> cli
+    ai -- "HTTPS · system, history, current turn" --> chatAPI
+    ai -- "spawns · bounded transcript and prompt" --> cursor
     cli -- HTTPS --> anthropic
     cli -- "MCP over stdio" --> mcp
     external -- "MCP over stdio" --> mcp
@@ -47,6 +51,7 @@ flowchart TB
 | `Flotion.app` | the user | the database, through `FlotionCore` |
 | `flotion-mcp` | an MCP client (Claude Code, or the in-app `claude`) | the same database file; pings the app after each write |
 | `claude` | the app, one per request | Anthropic over HTTPS; `flotion-mcp` over stdio |
+| `agent` (Cursor CLI) | the app, one per Cursor request | Cursor, using Ask mode and a temporary workspace |
 
 The app and `flotion-mcp` share one SQLite file in WAL mode. After a write, `flotion-mcp` posts a Darwin notification and the app reloads the changed page, merging block by block so text the user is typing is never overwritten.
 
@@ -58,7 +63,7 @@ The app and `flotion-mcp` share one SQLite file in WAL mode. After a write, `flo
 | `FlotionMCP` | Core, MCP Swift SDK | The 12 tools, their schemas, and a blocking stdio transport |
 | `flotion-mcp` | FlotionMCP | The executable: three lines |
 | `FlotionEditor` | Core | `EditorState`: split, merge, indent, reorder, Markdown shortcuts, undo, merging remote changes |
-| `FlotionAI` | Core | `AIProvider`, the Claude Code provider, stream-json parser, chat session, prompts |
+| `FlotionAI` | Core | Provider adapters, response parsing, chat session and prompts |
 | `App/` | Core, Editor, AI | Views only |
 
 ## Data model
@@ -73,7 +78,7 @@ The app and `flotion-mcp` share one SQLite file in WAL mode. After a write, `flo
 
 ## How the assistant is contained
 
-The app never signs in and never sees a credential. It runs the unmodified `claude` binary with:
+Claude Code handles its own sign-in. Flotion runs the unmodified `claude` binary with:
 
 - `--tools ""`: no built-in tools, so no shell and no file access
 - `--strict-mcp-config` with one server, `flotion-mcp`
@@ -81,7 +86,9 @@ The app never signs in and never sees a credential. It runs the unmodified `clau
 - `--permission-mode dontAsk` with only `mcp__flotion` allowed
 - an empty working directory, and an environment with no API keys
 
-`FlotionAITests` asserts each of these flags.
+`FlotionAITests` asserts each of these flags. The HTTP providers have no workspace tools. The Cursor CLI runs in Ask mode with a temporary workspace and config, the workspace read boundary, and CLI permission rules denying shell, file, web, and MCP tools. The prompt travels as a local CLI argument. Flotion passes the Cursor key in the child environment and stores it and the HTTP provider keys in macOS Keychain.
+
+`ChatSession` owns the visible transcript. When the model changes, it drops the native session ID and page cache. The next request replays up to 12 recent completed exchanges, capped at roughly 16 KB of text, and includes the current page and selection anew. Failed and stopped turns, raw tool payloads, and earlier page snapshots stay out of the replay. Stateless providers receive this context on every request. Claude can resume its new native session on following turns with the same model.
 
 ## How a diagram is drawn
 

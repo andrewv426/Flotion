@@ -6,7 +6,7 @@ A minimal, native notes app for macOS in the style of Notion, built so that LLMs
 - **Native and fast.** SwiftUI and AppKit, no web runtime for the editor. A 5,000-block page opens in under 30 ms.
 - **MCP built in.** A bundled server lets Claude Code, Claude Desktop or any MCP client search, read and edit the workspace.
 - **Diagrams in your notes.** Flow describes a system and how it changes over time. Flotion lays out the nodes and arrows and plays the steps in the page.
-- **An assistant in the app.** A side panel that knows the open page, and "Edit with AI" on selected text. It runs on your Claude subscription through Claude Code; there is no API key.
+- **An assistant in the app.** A side panel that knows the open page, and "Edit with AI" on selected text. Choose Claude, ChatGPT (OpenAI), Gemini, Grok, or Cursor from the Assistant panel.
 
 ## Diagrams with Flow
 
@@ -80,7 +80,7 @@ To try an example, open the assistant with ⌘J and ask it to insert a diagram i
 
 ## Requirements
 
-macOS 15 or later on Apple Silicon, Xcode 26, and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`). The assistant also needs [Claude Code](https://code.claude.com/docs/en/setup), signed in.
+macOS 15 or later on Apple Silicon, Xcode 26, and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`).
 
 ## Build and run
 
@@ -96,7 +96,11 @@ open .build/xcode/Build/Products/Debug/Flotion.app
 
 ## Connect an LLM
 
-**Inside the app:** open Settings, sign in to Claude, then press ⌘J.
+**Inside the app:** open Settings, choose a provider, and enable the models you want in the picker. [Claude Code](https://code.claude.com/docs/en/setup) uses your existing sign-in. OpenAI, Gemini, and Grok use API keys. Cursor requires the [Cursor CLI](https://cursor.com/docs/cli/installation) and a Cursor API key. Flotion stores API keys in macOS Keychain.
+
+Press ⌘J and choose a model above the composer. Claude can read and edit the workspace. The other providers can answer questions about the open page and draft text. All providers can preview inline edits for you to apply.
+
+After a model switch, the next message sends recent completed chat turns and the current page and selection to the selected provider. Long chats keep a bounded transcript for handoff, and long pages may be truncated for text providers. Start a new chat to send a request without the previous conversation.
 
 ![The assistant panel after an edit](docs/images/assistant-panel.png)
 
@@ -117,7 +121,7 @@ Packages/FlotionKit/
   Sources/FlotionMCP/       MCP tools and transport
   Sources/flotion-mcp/      the MCP server executable
   Sources/FlotionEditor/    view-free editing rules
-  Sources/FlotionAI/        Claude Code provider, chat session
+  Sources/FlotionAI/        Assistant providers and chat session
   Tests/                    unit, contract and budget tests
 Scripts/                    verify.sh, selftest.sh, perftest.sh
 Spikes/                     the two timing experiments the design rests on
