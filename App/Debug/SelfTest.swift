@@ -199,12 +199,22 @@ enum SelfTest {
                         button.click();
                         seen.push(window.flotion.index() + ':' + title.textContent);
                       }
-                      return seen.join('|');
+                      const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+                      const caption = document.getElementById('caption');
+                      const outgoing = document.querySelectorAll('.cap-copy[aria-hidden="true"]');
+                      const animated = caption.getAnimations().length > 0;
+                      return { sequence: seen.join('|'), motion: reduced
+                        ? !animated && outgoing.length === 0
+                        : animated && outgoing.length > 0 && [...outgoing].every(copy => !copy.querySelector('[id]')) };
                     })()
-                    """) as? String
-                check(sequence == "1:SYN-ACK|2:ACK|1:SYN-ACK|0:SYN|1:SYN-ACK|2:ACK",
-                      "rapid diagram clicks update the step and caption together, got \(String(describing: sequence))")
+                    """) as? [String: Any]
+                let captions = sequence?["sequence"] as? String
+                check(captions == "1:SYN-ACK|2:ACK|1:SYN-ACK|0:SYN|1:SYN-ACK|2:ACK",
+                      "rapid diagram clicks update the step and caption together, got \(String(describing: captions))")
+                check(sequence?["motion"] as? Bool == true, "caption motion respects reduced motion and keeps outgoing text out of accessibility")
                 await pause(900)
+                let settled = try? await web.evaluateJavaScript("document.querySelectorAll('.cap-copy').length === 1") as? Bool
+                check(settled == true, "interrupted caption animations clean up after settling")
                 let last = try? await web.evaluateJavaScript("[...document.querySelectorAll('.node')].map(n => n.dataset.tone + ':' + n.querySelector('.tag').textContent).join(' ')") as? String
                 check(last == "good:established good:established", "step 3 shows both ends established, got \(String(describing: last))")
                 let head = try? await web.evaluateJavaScript("document.querySelector('.edge').classList.contains('at-hi')") as? Bool

@@ -144,7 +144,7 @@ public enum DiagramTemplate {
             <body>
             <div class="fig" id="fig" tabindex="0">
               <svg class="stage" id="stage" role="img"></svg>
-              <div class="cap"><div class="cap-title" id="cap-title"></div><div class="cap-text" id="cap-text"></div></div>
+              <div class="cap"><div class="cap-copy" id="caption"><div class="cap-title" id="cap-title"></div><div class="cap-text" id="cap-text"></div></div></div>
               <div class="controls">
                 <button class="nav" id="prev" aria-label="Previous step"><svg viewBox="0 0 16 16"><path d="M10 3.5 5.5 8l4.5 4.5"/></svg></button>
                 <div class="dots" id="dots"></div>
@@ -160,22 +160,22 @@ public enum DiagramTemplate {
 
     static let flowStyle = #"""
         body { overflow: hidden; }
-        .fig { outline: none; }
+        .fig { outline: none; --motion-ease: cubic-bezier(.2,.7,.2,1); }
         .stage { display: block; margin: 0 auto; width: 100%; height: auto; overflow: visible; }
         .stage.no-anim, .stage.no-anim * { transition: none !important; }
 
         .group rect { fill: var(--fl-group); }
         .group text { fill: var(--fl-muted); font-size: 12px; font-weight: 500; }
-        .group, .node, .edge, .elabel { transition: opacity .18s ease; }
-        .off { opacity: 0; }
+        .group, .node, .edge, .elabel { transition: opacity .26s var(--motion-ease); }
         .dim { opacity: .28; }
+        .off { opacity: 0; }
 
-        .node .inner { transform-box: fill-box; transform-origin: center; transition: transform .22s cubic-bezier(.2,.8,.2,1); }
-        .node.off .inner { transform: scale(.94); }
-        .shape { fill: var(--fl-node); stroke: var(--fl-node-border); stroke-width: 1.25; transition: fill .18s ease, stroke .18s ease; }
-        .ring { fill: none; stroke: var(--fl-accent); stroke-width: 1.5; opacity: 0; pointer-events: none; }
-        .label { fill: var(--fl-text); font-size: 14px; font-weight: 500; transition: transform .18s ease, fill .18s ease; }
-        .tag { fill: var(--fl-muted); font-size: 12px; transition: fill .18s ease; }
+        .node .inner { transform-box: fill-box; transform-origin: center; transition: transform .32s var(--motion-ease); }
+        .node.off .inner { transform: translateY(5px) scale(.96); }
+        .shape { fill: var(--fl-node); stroke: var(--fl-node-border); stroke-width: 1.25; transition: fill .26s ease, stroke .26s ease; }
+        .ring { fill: none; stroke: var(--tone, var(--fl-accent)); stroke-width: 1.5; opacity: 0; pointer-events: none; }
+        .label { fill: var(--fl-text); font-size: 14px; font-weight: 500; transition: transform .26s var(--motion-ease), fill .26s ease; }
+        .tag { fill: var(--fl-muted); font-size: 12px; transition: fill .26s ease; }
         .node[data-tone="accent"] { --tone: var(--fl-accent); }
         .node[data-tone="good"] { --tone: var(--fl-good); }
         .node[data-tone="warn"] { --tone: var(--fl-warn); }
@@ -190,9 +190,10 @@ public enum DiagramTemplate {
         .edge.solid .line { stroke-dasharray: 1; stroke-dashoffset: 0; }
         .edge.solid.off .line { stroke-dashoffset: 1; }
         .edge.dashed .line { stroke-dasharray: 4 4; }
-        .head { fill: var(--fl-line); stroke: var(--fl-line); stroke-width: 1; stroke-linejoin: round; opacity: 0;
-                transition: opacity .15s ease, fill .25s ease, stroke .25s ease; }
-        .edge.at-hi .head.hi, .edge.at-lo .head.lo { opacity: 1; }
+        .head { fill: var(--fl-line); stroke: var(--fl-line); stroke-width: 1; stroke-linejoin: round;
+                transition: fill .25s ease, stroke .25s ease; }
+        .direction { opacity: 0; transition: opacity .26s var(--motion-ease); }
+        .edge.at-hi .direction.hi, .edge.at-lo .direction.lo { opacity: 1; }
         .edge.live .line { stroke: var(--fl-accent); stroke-width: 1.6; }
         .edge.live .head { fill: var(--fl-accent); stroke: var(--fl-accent); }
         .elabel { fill: var(--fl-muted); font-size: 12.5px; font-weight: 500; paint-order: stroke; stroke: var(--fl-bg);
@@ -201,7 +202,9 @@ public enum DiagramTemplate {
         .elabel.live { fill: var(--fl-accent); }
         .token { fill: var(--fl-accent); }
 
-        .cap { box-sizing: border-box; height: 66px; padding: 8px 16px 0; text-align: center; overflow: hidden; }
+        .cap { position: relative; height: 66px; text-align: center; overflow: hidden; }
+        .cap-copy { position: absolute; inset: 8px 16px 0; }
+        .cap-copy[aria-hidden] { pointer-events: none; user-select: none; }
         .cap-title { font-size: 14px; line-height: 18px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .cap-text { margin-top: 2px; font-size: 13px; line-height: 18px; color: var(--fl-muted);
                     display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
@@ -221,8 +224,7 @@ public enum DiagramTemplate {
         @media (prefers-reduced-motion: reduce) { .stage, .stage *, .controls button { transition: none !important; } }
         """#
 
-    /// Draws the scene once, then moves between steps by switching each element's state and letting
-    /// CSS transitions do the rest. Scripted motion is used for the messages sent along edges.
+    /// Draws a persistent scene and animates its changes as the player moves between steps.
     static let flowPlayer = #"""
         (function () {
           const S = JSON.parse(document.getElementById('scene').textContent);
@@ -235,6 +237,8 @@ public enum DiagramTemplate {
           };
           const $ = id => document.getElementById(id);
           const fig = $('fig'), stage = $('stage');
+          const caption = $('caption'), captionTitle = $('cap-title'), captionText = $('cap-text');
+          const ease = 'cubic-bezier(.2,.7,.2,1)';
           stage.setAttribute('viewBox', [S.x, S.y, S.w, S.h].join(' '));
           stage.style.maxWidth = S.w + 'px';
           if (!S.stepped) fig.classList.add('static');
@@ -248,11 +252,16 @@ public enum DiagramTemplate {
           });
           const edges = S.edges.map(d => {
             const e = gEdges.appendChild(el('g', { class: 'edge ' + (d.solid ? 'solid' : 'dashed') }));
-            const line = e.appendChild(el('path', { class: 'line' }));
-            if (d.solid) line.setAttribute('pathLength', 1);
-            e.append(el('path', { class: 'head hi', d: d.headHi }), el('path', { class: 'head lo', d: d.headLo }));
+            const direction = (side, linePath, headPath) => {
+              const group = e.appendChild(el('g', { class: 'direction ' + side }));
+              const line = group.appendChild(el('path', { class: 'line', d: linePath }));
+              if (d.solid) line.setAttribute('pathLength', 1);
+              group.appendChild(el('path', { class: 'head', d: headPath }));
+              return line;
+            };
+            const hi = direction('hi', d.lineHi, d.headHi), lo = direction('lo', d.lineLo, d.headLo);
             const label = gLabels.appendChild(el('text', { class: 'elabel' + (d.inGroup ? ' in-group' : ''), x: d.lx, y: d.ly, dy: '.35em', 'text-anchor': d.anchor }));
-            return { e, line, label };
+            return { e, hi, lo, label };
           });
           const nodes = S.nodes.map(d => {
             const e = gNodes.appendChild(el('g', { class: 'node', transform: 'translate(' + d.x + ',' + d.y + ')' }));
@@ -272,16 +281,56 @@ public enum DiagramTemplate {
           });
 
           const still = matchMedia('(prefers-reduced-motion: reduce)');
-          let index = 0, activeTokens = null, timer = null;
+          let index = 0, activeTokens = null, timer = null, captionMotion;
+          const textMotions = new WeakMap();
+          const pulses = new WeakMap();
 
-          function updateText(e, text) {
-            if (e.textContent !== text) e.textContent = text;
+          function updateText(e, text, animate, offset) {
+            if (e.textContent === text) return;
+            textMotions.get(e)?.cancel();
+            e.textContent = text;
+            if (animate && text) {
+              textMotions.set(e, e.animate([{ translate: '0 ' + offset + 'px' }, { translate: '0 0' }], { duration: 260, easing: ease }));
+            }
+          }
+
+          function updateCaption(step, animate, direction) {
+            if (captionTitle.textContent === step.title && captionText.textContent === step.caption) return;
+            if (animate) {
+              const current = captionMotion?.playState === 'running' ? getComputedStyle(caption) : null;
+              const opacity = current ? Number(current.opacity) : 1;
+              if (opacity > .25 && (captionTitle.textContent || captionText.textContent)) {
+                const outgoing = caption.cloneNode(true);
+                outgoing.removeAttribute('id');
+                outgoing.querySelectorAll('[id]').forEach(e => e.removeAttribute('id'));
+                outgoing.setAttribute('aria-hidden', 'true');
+                caption.before(outgoing);
+                outgoing.animate([{ opacity, translate: current?.translate ?? 'none' },
+                                  { opacity: 0, translate: '0 ' + (-direction * 8) + 'px' }],
+                                 { duration: 180, easing: ease, fill: 'forwards' }).onfinish = () => outgoing.remove();
+              }
+            }
+            captionMotion?.cancel();
+            captionTitle.textContent = step.title;
+            captionText.textContent = step.caption;
+            if (animate) {
+              captionMotion = caption.animate([{ opacity: .2, translate: '0 ' + (direction * 8) + 'px' },
+                                               { opacity: 1, translate: '0 0' }], { duration: 260, easing: ease });
+            }
+          }
+
+          function pulse(ring, opacity) {
+            pulses.get(ring)?.cancel();
+            pulses.set(ring, ring.animate([{ opacity, strokeWidth: '2px' }, { opacity: 0, strokeWidth: '8px' }],
+                                          { duration: 440, easing: ease }));
           }
 
           function go(i, animate) {
+            const previous = S.steps[index], direction = i < index ? -1 : 1;
             index = i;
             animate = animate && !still.matches;
             const step = S.steps[index];
+            updateCaption(step, animate, direction);
             if (activeTokens) {
               // Stop traveling on paths whose geometry is about to change. Fade the old dots in place.
               const outgoing = activeTokens;
@@ -293,18 +342,22 @@ public enum DiagramTemplate {
               }
             }
             step.groups.forEach((s, k) => { groups[k].classList.toggle('off', !s.on); groups[k].classList.toggle('dim', s.dim); });
+            const receivers = new Set(step.sends.map(send => send.to));
             step.nodes.forEach((s, k) => {
-              const n = nodes[k];
+              const n = nodes[k], before = previous.nodes[k];
               n.e.classList.toggle('off', !s.on);
               n.e.classList.toggle('dim', s.dim);
               if (s.tone) n.e.dataset.tone = s.tone; else delete n.e.dataset.tone;
-              updateText(n.label, s.label);
-              updateText(n.tag, s.tag);
+              updateText(n.label, s.label, animate, direction * 4);
+              updateText(n.tag, s.tag, animate, direction * 5);
               n.label.style.transform = s.tag ? 'translateY(-10px)' : '';
+              if (animate && s.on && !s.dim && !receivers.has(k) &&
+                  (s.label !== before.label || s.tag !== before.tag || s.tone !== before.tone)) {
+                pulse(n.ring, .28);
+              }
             });
             step.edges.forEach((s, k) => {
-              const d = S.edges[k], e = edges[k];
-              e.line.setAttribute('d', s.hi ? d.lineHi : d.lineLo);
+              const e = edges[k];
               e.e.classList.toggle('off', !s.on);
               e.e.classList.toggle('dim', s.dim);
               e.e.classList.toggle('live', s.live);
@@ -313,22 +366,21 @@ public enum DiagramTemplate {
               e.label.classList.toggle('off', !s.on);
               e.label.classList.toggle('dim', s.dim);
               e.label.classList.toggle('live', s.live);
-              updateText(e.label, s.label);
+              updateText(e.label, s.label, animate, direction * 4);
             });
-            updateText($('cap-title'), step.title);
-            updateText($('cap-text'), step.caption);
             dots.forEach((dot, k) => dot.classList.toggle('on', k === index));
             $('prev').disabled = index === 0;
             $('next').disabled = index === S.steps.length - 1;
             if (animate && step.sends.length) {
               const tokens = activeTokens = gTokens.appendChild(el('g', {}));
-              step.sends.forEach((send, order) => travel(send, order, tokens));
+              step.sends.forEach((send, order) => travel(send, order, tokens, step.edges[send.edge].hi));
             }
           }
 
           // A dot runs the edge from sender to receiver, then the receiver's outline pulses once.
-          function travel(send, order, tokens) {
-            const path = edges[send.edge].line, length = path.getTotalLength();
+          function travel(send, order, tokens, hi) {
+            const edge = edges[send.edge], path = hi ? edge.hi : edge.lo;
+            const length = path.getTotalLength();
             const dot = tokens.appendChild(el('circle', { class: 'token', r: 3.5, opacity: 0 }));
             const startAt = performance.now() + order * 480;
             const duration = Math.min(650, Math.max(320, length * 2.2));
@@ -337,7 +389,7 @@ public enum DiagramTemplate {
               const t = (now - startAt) / duration;
               if (t >= 1) {
                 dot.remove();
-                nodes[send.to].ring.animate([{ opacity: .5, strokeWidth: '1.5px' }, { opacity: 0, strokeWidth: '10px' }], { duration: 280, easing: 'ease-out' });
+                pulse(nodes[send.to].ring, .55);
                 return;
               }
               if (t > 0) {
