@@ -44,6 +44,41 @@ struct EditorView: NSViewRepresentable {
 final class EditorTableView: NSTableView {
     var onWidthChange: (() -> Void)?
     private var lastWidth: CGFloat = 0
+    private weak var diagramMouseTarget: NSView?
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let rowIndex = row(at: point)
+        // Forward the whole gesture when AppKit gives a diagram click to the table for row selection.
+        if rowIndex >= 0,
+           let cell = view(atColumn: 0, row: rowIndex, makeIfNecessary: false) as? DiagramBlockCell,
+           let webView = cell.webView,
+           webView.bounds.contains(webView.convert(point, from: self)) {
+            diagramMouseTarget = webView
+            window?.makeFirstResponder(webView)
+            webView.mouseDown(with: event)
+        } else {
+            diagramMouseTarget = nil
+            super.mouseDown(with: event)
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if let target = diagramMouseTarget {
+            target.mouseDragged(with: event)
+        } else {
+            super.mouseDragged(with: event)
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if let target = diagramMouseTarget {
+            diagramMouseTarget = nil
+            target.mouseUp(with: event)
+        } else {
+            super.mouseUp(with: event)
+        }
+    }
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
