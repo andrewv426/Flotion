@@ -74,24 +74,6 @@ import Testing
         ])
     }
 
-    @Test func geminiListsModelsInTheFlotionSignInProfile() async throws {
-        let folder = try directory()
-        defer { try? FileManager.default.removeItem(at: folder) }
-        let binary = try stub(in: folder, script: #"""
-            [[ "$*" == "--list-models --output-format json" && -z "${GEMINI_API_KEY:-}" ]]
-            grep -Fq '"enforcedType": "oauth-personal"' "$GEMINI_CLI_HOME/.gemini/settings.json"
-            [[ -f "$GEMINI_CLI_HOME/.gemini/oauth_creds.json" && ! -f .gemini/settings.json ]]
-            [[ -z "$(cat)" ]]
-            echo '['
-            echo '  {"modelId":"gemini-test","displayName":"Gemini Test"}'
-            echo ']'
-            """#)
-        let provider = AccountCLIProvider(.gemini, executable: binary, directory: folder)
-        _ = try provider.signInCommand()
-        try Data().write(to: provider.geminiCredentials)
-        #expect(await provider.availableModels() == [AccountModel(id: "gemini-test", name: "Gemini Test")])
-    }
-
     @Test func catalogErrorsAndCancellationReturnWithoutInventingModels() async throws {
         let folder = try directory()
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -107,35 +89,6 @@ import Testing
         try await Task.sleep(for: .milliseconds(50))
         task.cancel()
         #expect(await task.value == nil)
-    }
-
-    @Test func geminiUsesOneProfileForGoogleSignInAndHeadlessRequests() async throws {
-        let folder = try directory()
-        defer { try? FileManager.default.removeItem(at: folder) }
-        let binary = try stub(in: folder, script: #"""
-            [[ "$*" == *"--output-format stream-json"* && "$*" == *"--model selected-model"* ]]
-            [[ "$*" != *"Latest question"* && -z "${GEMINI_API_KEY:-}" ]]
-            grep -Fq '"enforcedType": "oauth-personal"' "$GEMINI_CLI_HOME/.gemini/settings.json"
-            grep -Fq '"core": []' "$GEMINI_CLI_HOME/.gemini/settings.json"
-            [[ "$*" == *"--allowed-mcp-server-names flotion-no-mcp"* && ! -f .gemini/settings.json ]]
-            input="$(cat)"
-            [[ "$input" == *"Latest question"* && "$input" == *"Previous answer"* ]]
-            echo '{"type":"init","session_id":"private","model":"selected-model"}'
-            echo '{"type":"message","role":"user","content":"ignored echo"}'
-            echo '{"type":"message","role":"assistant","content":"Gemini "}'
-            echo '{"type":"message","role":"assistant","content":"answer","delta":true}'
-            echo '{"type":"result","status":"success"}'
-            """#)
-        let provider = AccountCLIProvider(.gemini, executable: binary, directory: folder)
-        #expect(await provider.status() == .signedOut)
-        let signIn = try #require(try provider.signInCommand())
-        #expect(signIn.environment["GEMINI_CLI_HOME"] == provider.profile.path)
-        try Data().write(to: provider.geminiCredentials)
-        #expect(await provider.status() == .ready(plan: nil))
-        #expect(await events(provider, request()) == [
-            .started(sessionID: "", model: "selected-model"), .text("Gemini "), .text("answer"),
-            .finished(AIResult(text: "Gemini answer")),
-        ])
     }
 
     @Test func codexChatExposesOnlyTheFlotionServerAndReportsToolProgress() async throws {
@@ -166,52 +119,11 @@ import Testing
         ])
     }
 
-    @Test func geminiChatScopesConfigAndReadWriteEventsToTheFlotionServer() async throws {
-        let folder = try directory()
-        defer { try? FileManager.default.removeItem(at: folder) }
-        let directoryRecord = folder.appendingPathComponent("turn-directory")
-        let binary = try stub(in: folder, script: #"""
-            [[ "$*" == *"--allowed-mcp-server-names flotion --model"* ]]
-            grep -Fq '"core": []' "$GEMINI_CLI_HOME/.gemini/settings.json"
-            grep -Fq 'toolName = "*"' "$GEMINI_CLI_HOME/.gemini/policies/flotion.toml"
-            grep -Fq 'mcpName = "flotion"' "$GEMINI_CLI_HOME/.gemini/policies/flotion.toml"
-            grep -Fq '"FLOTION_DB":"/test/my workspace.sqlite"' .gemini/settings.json
-            grep -Fq '"FLOTION_ACTOR":"chat:turn-one"' .gemini/settings.json
-            grep -Fq '"command":"/test/Flotion Test.app/flotion-mcp"' .gemini/settings.json
-            printf '%s' "$PWD" > '#PATH#'
-            input="$(cat)"
-            [[ "$input" == *"Previous answer"* ]]
-            echo '{"type":"tool_use","tool_name":"run_shell_command","tool_id":"shell"}'
-            echo '{"type":"tool_result","tool_id":"shell","status":"error"}'
-            echo '{"type":"tool_use","tool_name":"mcp_flotion_get_page","tool_id":"read"}'
-            echo '{"type":"tool_result","tool_id":"read","status":"success"}'
-            echo '{"type":"tool_use","tool_name":"mcp_flotion_update_block","tool_id":"edit"}'
-            echo '{"type":"tool_result","tool_id":"edit","status":"success"}'
-            echo '{"type":"result","status":"success"}'
-            """#.replacingOccurrences(of: "#PATH#", with: directoryRecord.path))
-        let provider = AccountCLIProvider(.gemini, executable: binary, directory: folder)
-        _ = try provider.signInCommand()
-        try Data().write(to: provider.geminiCredentials)
-        #expect(await events(provider, request(tools: workspaceTools)) == [
-            .toolStarted(id: "read", name: "get_page"), .toolFinished(id: "read", isError: false),
-            .toolStarted(id: "edit", name: "update_block"), .toolFinished(id: "edit", isError: false),
-            .finished(AIResult(text: "")),
-        ])
-        let turnDirectory = try String(contentsOf: directoryRecord, encoding: .utf8)
-        #expect(!FileManager.default.fileExists(atPath: turnDirectory))
-        let profile = try String(contentsOf: provider.geminiSettings, encoding: .utf8)
-        #expect(!profile.contains("FLOTION_DB"))
-    }
-
     @Test func terminalErrorsAndInterruptedStreamsFail() {
         var codex = AccountCLIStream(cli: .codex, model: "")
         _ = codex.consume(Data(#"{"type":"turn.failed","error":{"message":"401 Unauthorized"}}"#.utf8))
         #expect(codex.result(label: "ChatGPT").failure == .notSignedIn)
-        var gemini = AccountCLIStream(cli: .gemini, model: "")
-        _ = gemini.consume(Data(#"{"type":"message","role":"assistant","content":"unfinished"}"#.utf8))
-        #expect(gemini.result(label: "Gemini").failure == .other)
-        _ = gemini.consume(Data(#"{"type":"result","status":"error","error":{"message":"quota exceeded"}}"#.utf8))
-        #expect(gemini.result(label: "Gemini").failure == .rateLimited)
+
     }
 
     private var workspaceTools: ToolAccess {

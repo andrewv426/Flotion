@@ -2,7 +2,7 @@
 
 One rule shapes the layout: **all data logic lives in `FlotionCore`, and everything else goes through it.** The app, the MCP server and the in-app assistant are three clients of the same code, so anything the UI can do to a page an LLM can do through the same path.
 
-The Assistant routes requests to the model selected in Flotion. Claude Code, Codex CLI, and Gemini CLI all use the same bundled `flotion-mcp` server for chat. Inline edits use a tool-free request and the user applies the result.
+The Assistant routes requests to the model selected in Flotion. Claude Code, Codex CLI, and Antigravity CLI all use the same bundled `flotion-mcp` server for chat. Inline edits use a tool-free request and the user applies the result.
 
 ```mermaid
 flowchart TB
@@ -16,7 +16,7 @@ flowchart TB
     cli["claude CLI<br/>the user's own install,<br/>signed in with their subscription"]
     anthropic(["Anthropic"])
     codex["Codex CLI<br/>ChatGPT account"]
-    gemini["Gemini CLI<br/>Google account"]
+    agy["Antigravity CLI<br/>Google account"]
     external["External MCP clients<br/>Claude Code, Claude Desktop, others"]
     mcp["flotion-mcp<br/>Swift CLI inside the .app<br/>pages · blocks · search · diagrams"]
 
@@ -32,11 +32,11 @@ flowchart TB
     panel --> ai
     ai -- "spawns · stream-json over pipes" --> cli
     ai -- "text over stdin · JSON lines out" --> codex
-    ai -- "text over stdin · JSON lines out" --> gemini
+    ai -- "ACP JSON-RPC" --> agy
     cli -- HTTPS --> anthropic
     cli -- "MCP over stdio" --> mcp
     codex -- "MCP over stdio" --> mcp
-    gemini -- "MCP over stdio" --> mcp
+    agy -- "MCP over stdio" --> mcp
     external -- "MCP over stdio" --> mcp
     sidebar --> core
     editorlib --> core
@@ -54,7 +54,7 @@ flowchart TB
 | `flotion-mcp` | an external client or any of the three in-app CLIs | the same database file; pings the app after each write |
 | `claude` | the app, one per request | Anthropic over HTTPS; `flotion-mcp` over stdio |
 | `codex` | the app, one per ChatGPT request | OpenAI through the user's ChatGPT sign-in and `flotion-mcp` over stdio |
-| `gemini` | the app, one per Gemini request | Google through Flotion's Gemini CLI profile and `flotion-mcp` over stdio |
+| `agy acp` | the app, one per Antigravity request | Cached Antigravity sign-in and Flotion MCP servers supplied through ACP |
 
 The app and `flotion-mcp` share one SQLite file in WAL mode. After a write, `flotion-mcp` posts a Darwin notification and the app reloads the changed page, merging block by block so text the user is typing is never overwritten.
 
@@ -89,15 +89,15 @@ Claude Code handles its own sign-in. Flotion runs the unmodified `claude` binary
 - `--permission-mode dontAsk` with only `mcp__flotion` allowed
 - an empty working directory, and an environment with no API keys
 
-`FlotionAITests` asserts the Claude flags and the Codex and Gemini settings. Codex runs in a read-only sandbox with command execution, hooks, apps, plugins, and web search disabled. A chat request adds one stdio MCP server and enables calls to it. Gemini uses a dedicated Google sign-in profile with an empty core-tool allowlist and a policy that allows only the Flotion server. A chat request creates temporary MCP settings for that turn. Flotion passes the workspace database and a unique turn actor to the bundled server. Every inline edit omits the MCP connection. The CLIs manage their own sign-ins.
+`FlotionAITests` asserts the Claude flags and the Codex and Antigravity settings. Codex runs in a read-only sandbox with command execution, hooks, apps, plugins, and web search disabled. A chat request adds one stdio MCP server and enables calls to it. Antigravity runs through its Agent Client Protocol with default customizations disabled. A chat session receives the bundled Flotion MCP server with its database and turn actor. Inline sessions receive an empty server list. Flotion declines filesystem and terminal proxy requests, and grants MCP permissions only for Flotion tools. Flotion passes the workspace database and a unique turn actor to the bundled server. Every inline edit omits the MCP connection. The CLIs manage their own sign-ins.
 
 ## Context and storage
 
-Settings refreshes the signed-in model catalogs through Codex app-server's `model/list` and Gemini CLI's `--list-models --output-format json`. These metadata requests use the same account profiles as chat and stop after 15 seconds. Codex pagination and hidden entries are handled before publishing the list. New entries appear in the Assistant picker automatically, and model visibility choices persist in preferences. Catalogs refresh on return to Settings after sign-in and through **Check again**.
+Settings refreshes the signed-in model catalogs through Codex app-server's `model/list` and Antigravity ACP's `session/new` model metadata. These metadata requests use the same account profiles as chat and stop after 15 seconds. Codex pagination and hidden entries are handled before publishing the list. New entries appear in the Assistant picker automatically, and model visibility choices persist in preferences. Catalogs refresh on return to Settings after sign-in and through **Check again**.
 
 Flotion keeps the visible transcript in `ChatSession` in memory, for the life of the open chat. On a model switch it clears the native session ID and remembered page. The next send includes up to 12 recent completed exchanges within roughly 16 KB of text, plus the current page and selection. This replay carries prior user messages and assistant replies (including an annotation for an undone edit). Earlier page snapshots, tool arguments and results, and failed and stopped turns stay out of the replay. A long current page is fetched with `get_page` if needed.
 
-Codex and Gemini start a new CLI request and receive that replay on every turn. Claude can reuse its own session for consecutive turns with the same model. **New Chat** clears Flotion's conversation. Claude Code and Gemini CLI may retain their own local sessions under their respective CLI profiles. Flotion runs Codex with `--ephemeral`, which disables its session rollout files.
+Codex and Antigravity start a new CLI request and receive that replay on every turn. Claude can reuse its own session for consecutive turns with the same model. **New Chat** clears Flotion's conversation. Claude Code and Antigravity CLI may retain their own local sessions under their respective CLI profiles. Flotion runs Codex with `--ephemeral`, which disables its session rollout files.
 
 The workspace's SQLite `change_log` persists before and after values of edits for Undo. It stores changes to notes and their turn attribution. Flotion keeps the chat transcript and tool responses out of that table.
 

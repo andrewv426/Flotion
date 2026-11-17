@@ -1,7 +1,7 @@
 import Foundation
 
 enum AssistantService: String, CaseIterable, Codable, Identifiable {
-    case claude, openAI, gemini
+    case claude, openAI, antigravity
 
     var id: String { rawValue }
 
@@ -9,7 +9,7 @@ enum AssistantService: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .claude: "Claude"
         case .openAI: "ChatGPT"
-        case .gemini: "Gemini"
+        case .antigravity: "Antigravity"
         }
     }
 
@@ -17,7 +17,7 @@ enum AssistantService: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .claude: "Claude Code"
         case .openAI: "Codex CLI"
-        case .gemini: "Gemini CLI"
+        case .antigravity: "Antigravity CLI"
         }
     }
 
@@ -25,7 +25,7 @@ enum AssistantService: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .claude: URL(string: "https://code.claude.com/docs/en/setup")!
         case .openAI: URL(string: "https://developers.openai.com/codex/cli")!
-        case .gemini: URL(string: "https://geminicli.com/docs/get-started/installation/")!
+        case .antigravity: URL(string: "https://antigravity.google/docs/install/")!
         }
     }
 
@@ -33,7 +33,7 @@ enum AssistantService: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .claude: "Sign in through Claude Code to use chat, inline edits, and workspace tools."
         case .openAI: "Sign in with your ChatGPT account through Codex CLI."
-        case .gemini: "Choose Sign in with Google when Gemini CLI opens, then return to Flotion."
+        case .antigravity: "Sign in with Google through Antigravity CLI to use your available models."
         }
     }
 }
@@ -54,6 +54,24 @@ struct AssistantModel: Codable, Equatable, Identifiable {
         .init(service: .claude, alias: "sonnet", name: "Sonnet"),
         .init(service: .claude, alias: "haiku", name: "Haiku"),
         .init(service: .openAI, alias: "", name: "Codex default"),
-        .init(service: .gemini, alias: "", name: "Auto"),
+        .init(service: .antigravity, alias: "", name: "Account default"),
     ]
+}
+
+extension AssistantModel {
+    private enum CodingKeys: String, CodingKey { case service, alias, name }
+
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let service = try values.decode(String.self, forKey: .service)
+        if service == "gemini" {
+            self.service = .antigravity
+            alias = ""
+            name = "Account default"
+        } else {
+            self.service = try values.decode(AssistantService.self, forKey: .service)
+            alias = try values.decode(String.self, forKey: .alias)
+            name = try values.decode(String.self, forKey: .name)
+        }
+    }
 }

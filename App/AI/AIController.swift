@@ -74,17 +74,20 @@ final class AIController {
             .flatMap { try? JSONDecoder().decode([AssistantModel].self, from: $0) } ?? []
         let legacyAlias = defaults.string(forKey: "aiModel") ?? ""
         let legacy = AssistantModel(service: .claude, alias: legacyAlias, name: legacyAlias)
-        let previousID = defaults.string(forKey: "assistantModel") ?? legacy.id
-        var models = savedModels
+        func migratedID(_ id: String) -> String {
+            id.hasPrefix("gemini:") ? "antigravity:" : id
+        }
+        let previousID = migratedID(defaults.string(forKey: "assistantModel") ?? legacy.id)
+        var models = savedModels.filter { !AssistantModel.suggested.contains($0) }
         if defaults.string(forKey: "assistantModel") == nil,
            !(AssistantModel.suggested + models).contains(where: { $0.id == legacy.id }) {
             models.append(legacy)
         }
         let allModels = AssistantModel.suggested + models
-        let enabled = Set(defaults.stringArray(forKey: "assistantEnabledModels") ?? allModels.filter { $0.service == .claude }.map(\.id))
+        let enabled = Set((defaults.stringArray(forKey: "assistantEnabledModels") ?? allModels.filter { $0.service == .claude }.map(\.id)).map(migratedID))
         let visible = allModels.filter { enabled.contains($0.id) }
         let initialID = enabled.contains(previousID) ? previousID : (visible.first ?? .claudeDefault).id
-        knownCatalogIDs = Set(defaults.stringArray(forKey: "assistantKnownCatalogIDs") ?? [])
+        knownCatalogIDs = Set((defaults.stringArray(forKey: "assistantKnownCatalogIDs") ?? []).filter { !$0.hasPrefix("gemini:") })
         customModels = models
         enabledIDs = enabled.isEmpty ? [initialID] : enabled
         selectedModelID = initialID
@@ -92,7 +95,7 @@ final class AIController {
             ? Self.fakeProvider(workspace: workspace, sessionID: "fake-session") : ClaudeCodeProvider(workingDirectory: scratch)
         chat = ChatSession(provider: claude, workspace: workspace, server: serverURL)
         providers[.claude] = claude
-        for (service, cli) in [(AssistantService.openAI, AccountCLIProvider.CLI.codex), (.gemini, .gemini)] {
+        for (service, cli) in [(AssistantService.openAI, AccountCLIProvider.CLI.codex), (.antigravity, .agy)] {
             providers[service] = usesFakeProviders
                 ? Self.fakeProvider(workspace: workspace, sessionID: nil)
                 : AccountCLIProvider(cli, directory: scratch)
@@ -108,7 +111,7 @@ final class AIController {
                 providers[.claude] = ClaudeCodeProvider(executable: claude, workingDirectory: scratch)
                 if selectedModel.service == .claude { selectCurrentProvider() }
             }
-            for (service, cli) in [(AssistantService.openAI, AccountCLIProvider.CLI.codex), (.gemini, .gemini)] {
+            for (service, cli) in [(AssistantService.openAI, AccountCLIProvider.CLI.codex), (.antigravity, .agy)] {
                 if (providers[service] as? AccountCLIProvider)?.executable != AccountCLIProvider.locate(cli) {
                     providers[service] = AccountCLIProvider(cli, directory: scratch)
                     if selectedModel.service == service { selectCurrentProvider() }
@@ -131,7 +134,7 @@ final class AIController {
 
         if usesFakeProviders {
             applyCatalog([AccountModel(id: "codex-test", name: "Codex Test")], for: .openAI)
-            applyCatalog([AccountModel(id: "gemini-test", name: "Gemini Test")], for: .gemini)
+            applyCatalog([AccountModel(id: "agy-test", name: "Antigravity Test")], for: .antigravity)
             return
         }
         let catalogs = providers.compactMapValues { $0 as? AccountCLIProvider }
@@ -159,7 +162,7 @@ final class AIController {
     private func applyCatalog(_ models: [AccountModel]?, for service: AssistantService) {
         let previousModel = selectedModel
         let existingIDs = Set((AssistantModel.suggested + customModels).map(\.id))
-        let discovered = models?.filter { !$0.id.isEmpty && !(service == .gemini && $0.id == "auto") }
+        let discovered = models?.filter { !$0.id.isEmpty }
             .map { AssistantModel(service: service, alias: $0.id, name: $0.name) }
         modelCatalogs[service] = discovered
         for model in discovered ?? [] where knownCatalogIDs.insert(model.id).inserted {

@@ -590,8 +590,8 @@ enum SelfTest {
             let before = model.editor?.blocks.count ?? 0
             let priorMessages = ai.chat.messages.count
             let alternatives = AssistantModel.suggested.filter { $0.service != .claude }
-            check(alternatives.count == 2, "ChatGPT and Gemini are available in Settings")
-            let discovered = ai.allModels.filter { $0.alias == "codex-test" || $0.alias == "gemini-test" }
+            check(alternatives.count == 2, "ChatGPT and Antigravity are available in Settings")
+            let discovered = ai.allModels.filter { $0.alias == "codex-test" || $0.alias == "agy-test" }
             check(discovered.count == 2 && discovered.allSatisfy { ai.visibleModels.contains($0) },
                   "discovered account models appear in the picker automatically")
             if let model = discovered.first {
@@ -638,13 +638,13 @@ enum SelfTest {
                       "hiding the active model selects an available model")
             }
         } else {
-            check(false, "the smoke page is available for ChatGPT and Gemini")
+            check(false, "the smoke page is available for ChatGPT and Antigravity")
         }
 
         // Render the Settings window after the tests that use the editor's first responder.
-        if let ai = model.ai, let chatGPT = AssistantModel.suggested.first(where: { $0.service == .openAI }) {
-            ai.setEnabled(true, for: chatGPT)
-            ai.selectModel(chatGPT.id)
+        if let ai = model.ai, let antigravity = AssistantModel.suggested.first(where: { $0.service == .antigravity }) {
+            ai.setEnabled(true, for: antigravity)
+            ai.selectModel(antigravity.id)
             let settingsWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 580),
                                           styleMask: [.borderless], backing: .buffered, defer: false)
             let settings = NSHostingView(rootView: SettingsView(model: model))
@@ -652,7 +652,22 @@ enum SelfTest {
             settings.layoutSubtreeIfNeeded()
             await pause(150)
             snapshot("08c-assistant-model-settings", view: settings)
-            ai.setEnabled(false, for: chatGPT)
+            ai.setEnabled(false, for: antigravity)
+        }
+
+        if let workspace = model.workspace {
+            let defaults = AppDefaults.store
+            defaults.set(Data(#"[{"service":"openAI","alias":"saved-custom","name":"Saved model"},{"service":"gemini","alias":"gemini-3.5-flash","name":"Old Gemini"}]"#.utf8),
+                         forKey: "assistantCustomModels")
+            defaults.set(["gemini:gemini-3.5-flash", "openAI:saved-custom"], forKey: "assistantEnabledModels")
+            defaults.set("gemini:gemini-3.5-flash", forKey: "assistantModel")
+            let migrated = AIController(workspace: workspace)
+            check(migrated.selectedModel.service == .antigravity && migrated.selectedModel.alias.isEmpty,
+                  "a saved Gemini selection migrates to the Antigravity account default")
+            check(migrated.customModels.contains { $0.id == "openAI:saved-custom" },
+                  "migrating Gemini preserves custom models for other providers")
+            check(!migrated.allModels.contains { $0.alias == "gemini-3.5-flash" },
+                  "obsolete Gemini CLI IDs are removed from the picker")
         }
 
         if TestHost.focusTakenCount > 0 {

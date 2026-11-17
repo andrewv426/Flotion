@@ -30,13 +30,12 @@ public struct AICommand: Sendable {
 
 /// Account-authenticated CLIs. Flotion replays its own history on every request.
 public struct AccountCLIProvider: AIProvider {
-    public enum CLI: String, Sendable { case codex, gemini }
+    public enum CLI: String, Sendable { case codex, agy }
 
     public let supportsWorkspaceTools = true
     public let cli: CLI
     public let executable: URL?
     let directory: URL
-    let profile: URL
 
     public init(_ cli: CLI, directory: URL) {
         self.init(cli, executable: Self.locate(cli), directory: directory)
@@ -46,7 +45,6 @@ public struct AccountCLIProvider: AIProvider {
         self.cli = cli
         self.executable = executable
         self.directory = directory.appendingPathComponent(cli.rawValue, isDirectory: true)
-        profile = directory.appendingPathComponent("gemini-profile", isDirectory: true)
     }
 
     public static func locate(_ cli: CLI) -> URL? {
@@ -57,15 +55,17 @@ public struct AccountCLIProvider: AIProvider {
             .first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 
-    var label: String { cli == .codex ? "ChatGPT" : "Gemini" }
-    var geminiSettings: URL { profile.appendingPathComponent(".gemini/settings.json") }
-    var geminiCredentials: URL { profile.appendingPathComponent(".gemini/oauth_creds.json") }
+    var label: String { cli == .codex ? "ChatGPT" : "Antigravity" }
 
     public func status() async -> AIProviderStatus {
         guard let executable else { return .notInstalled }
-        if cli == .gemini {
-            // Gemini CLI has no local auth status command. Check only for the CLI's OAuth cache.
-            return FileManager.default.fileExists(atPath: geminiCredentials.path) ? .ready(plan: nil) : .signedOut
+        if cli == .agy {
+            do {
+                try prepareDirectory()
+                return await AntigravitySession.inspect(command(executable, AntigravitySession.arguments)).status
+            } catch {
+                return .notInstalled
+            }
         }
         return await Task.detached {
             let process = Process()
@@ -92,7 +92,7 @@ public struct AccountCLIProvider: AIProvider {
     public func signInCommand() throws -> AICommand? {
         guard let executable else { return nil }
         try prepareDirectory()
-        let arguments = cli == .codex ? ["login", "-c", "forced_login_method=\"chatgpt\""] : ["--skip-trust"]
+        let arguments = cli == .codex ? ["login", "-c", "forced_login_method=\"chatgpt\""] : ["acp", "--login"]
         return command(executable, arguments)
     }
 
@@ -108,10 +108,8 @@ public struct AccountCLIProvider: AIProvider {
                             "apps", "plugins", "hooks", "multi_agent", "multi_agent_v2", "code_mode"] {
                 args += ["--disable", feature]
             }
-        case .gemini:
-            args = ["--output-format", "stream-json", "--skip-trust", "--approval-mode", "default",
-                    "--extensions", "none", "--allowed-mcp-server-names"]
-            if case .flotion = request.tools { args.append("flotion") } else { args.append("flotion-no-mcp") }
+        case .agy:
+            return AntigravitySession.arguments
         }
         if let model = request.model { args += ["--model", model] }
         if cli == .codex { args.append("-") }
@@ -129,29 +127,6 @@ public struct AccountCLIProvider: AIProvider {
             """
     }
 
-    /// Gemini discovers MCP servers from project settings. A private per-turn directory
-    /// keeps the actor and database path out of the login profile and out of inline requests.
-    func geminiTurnDirectory(_ access: ToolAccess) throws -> URL? {
-        guard cli == .gemini, case .flotion(let server, let database, let actor) = access else { return nil }
-        let turn = FileManager.default.temporaryDirectory.appendingPathComponent("flotion-gemini-\(UUID())", isDirectory: true)
-        let settings = turn.appendingPathComponent(".gemini", isDirectory: true)
-        let config: [String: Any] = [
-            "mcpServers": ["flotion": ["command": server.path,
-                                      "env": ["FLOTION_DB": database.path, "FLOTION_ACTOR": actor]]],
-            "mcp": ["allowed": ["flotion"]],
-        ]
-        do {
-            try FileManager.default.createDirectory(at: turn, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-            try FileManager.default.createDirectory(at: settings, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-            let data = try JSONSerialization.data(withJSONObject: config, options: .withoutEscapingSlashes)
-            try data.write(to: settings.appendingPathComponent("settings.json"), options: .atomic)
-            return turn
-        } catch {
-            try? FileManager.default.removeItem(at: turn)
-            throw error
-        }
-    }
-
     public func run(_ request: AIRequest) -> AsyncStream<AIEvent> {
         AsyncStream { continuation in
             let task = Task.detached {
@@ -164,14 +139,16 @@ public struct AccountCLIProvider: AIProvider {
     }
 
     private func complete(_ request: AIRequest, _ continuation: AsyncStream<AIEvent>.Continuation) async -> AIResult {
-        guard let executable else { return .failed(.notInstalled, "Install \(cli == .codex ? "Codex CLI" : "Gemini CLI").") }
-        guard case .ready = await status() else { return .failed(.notSignedIn, "Sign in to \(label) in the CLI.") }
+        guard let executable else { return .failed(.notInstalled, "Install \(cli == .codex ? "Codex CLI" : "Antigravity CLI").") }
         guard !Task.isCancelled else { return .failed(.other, "Stopped.") }
         do {
             try prepareDirectory()
-            let turnDirectory = try geminiTurnDirectory(request.tools)
-            defer { if let turnDirectory { try? FileManager.default.removeItem(at: turnDirectory) } }
-            let command = command(executable, try arguments(for: request), in: turnDirectory)
+            if cli == .agy {
+                return await AntigravitySession.run(command(executable, AntigravitySession.arguments),
+                                                    request: request, continuation: continuation)
+            }
+            guard case .ready = await status() else { return .failed(.notSignedIn, "Sign in to \(label) in the CLI.") }
+            let command = command(executable, try arguments(for: request))
             let process = try AIProcess(executable: command.executable, arguments: command.arguments,
                                         workingDirectory: command.directory, environment: command.environment, includeStandardError: true)
             let lines = process.lines()
@@ -191,41 +168,14 @@ public struct AccountCLIProvider: AIProvider {
         }
     }
 
-    func command(_ executable: URL, _ arguments: [String], in turnDirectory: URL? = nil) -> AICommand {
-        var environment = AICommand.loginEnvironment(executable: executable)
-        if cli == .gemini { environment["GEMINI_CLI_HOME"] = profile.path }
-        return AICommand(executable: executable, arguments: arguments, directory: turnDirectory ?? directory, environment: environment)
+    func command(_ executable: URL, _ arguments: [String]) -> AICommand {
+        AICommand(executable: executable, arguments: arguments, directory: directory,
+                  environment: AICommand.loginEnvironment(executable: executable))
     }
 
     func prepareDirectory() throws {
         let files = FileManager.default
         try files.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        guard cli == .gemini else { return }
-        try files.createDirectory(at: geminiSettings.deletingLastPathComponent(), withIntermediateDirectories: true,
-                                  attributes: [.posixPermissions: 0o700])
-        if !files.fileExists(atPath: geminiSettings.path) {
-            let settings = """
-                {
-                  "security": {"auth": {"enforcedType": "oauth-personal"}, "disableYoloMode": true},
-                  "tools": {"core": []},
-                  "hooksConfig": {"enabled": false},
-                  "advanced": {"ignoreLocalEnv": true}
-                }
-                """
-            try settings.write(to: geminiSettings, atomically: true, encoding: .utf8)
-        }
-        let policies = geminiSettings.deletingLastPathComponent().appendingPathComponent("policies", isDirectory: true)
-        try files.createDirectory(at: policies, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        // In Gemini's user-policy tier, this rule outranks the empty core allowlist.
-        // Managed administrator rules remain higher priority.
-        let policy = """
-            [[rule]]
-            toolName = "*"
-            mcpName = "flotion"
-            decision = "allow"
-            priority = 800
-            """
-        try policy.write(to: policies.appendingPathComponent("flotion.toml"), atomically: true, encoding: .utf8)
     }
 }
 
@@ -250,7 +200,7 @@ struct AccountCLIStream {
             return []
         }
         switch (cli, type) {
-        case (.codex, "thread.started"), (.gemini, "init"):
+        case (.codex, "thread.started"):
             return [.started(sessionID: "", model: record["model"] as? String ?? model)]
         case (.codex, "item.started"), (.codex, "item.completed"):
             guard let item = record["item"] as? [String: Any] else { return [] }
@@ -263,27 +213,9 @@ struct AccountCLIStream {
             guard type == "item.completed", item["type"] as? String == "agent_message",
                   let content = item["text"] as? String else { return [] }
             return append(content, separator: text.isEmpty ? "" : "\n\n")
-        case (.gemini, "tool_use"):
-            let prefix = "mcp_flotion_"
-            guard let id = record["tool_id"] as? String, let name = record["tool_name"] as? String, name.hasPrefix(prefix) else { return [] }
-            return startTool(id, name: String(name.dropFirst(prefix.count)))
-        case (.gemini, "tool_result"):
-            guard let id = record["tool_id"] as? String else { return [] }
-            return finishTool(id, isError: record["status"] as? String != "success")
-        case (.gemini, "message"):
-            guard record["role"] as? String == "assistant", let content = record["content"] as? String else { return [] }
-            return append(content)
         case (.codex, "turn.completed"):
             completed = true
             failure = nil
-        case (.gemini, "result"):
-            completed = true
-            if record["status"] as? String == "success" {
-                failure = nil
-            } else {
-                detectFailure((record["error"] as? [String: Any])?["message"] as? String ?? "")
-                failure = failure ?? .other
-            }
         case (.codex, "turn.failed"):
             completed = true
             detectFailure((record["error"] as? [String: Any])?["message"] as? String ?? "")

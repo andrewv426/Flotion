@@ -280,7 +280,7 @@ private func tempDirectory() throws -> URL {
             }
             return [.finished(AIResult(text: "The launch is in May.", sessionID: "claude-session"))]
         }
-        let gemini = FakeProvider(supportsWorkspaceTools: false) { _ in [.finished(AIResult(text: "May works."))] }
+        let antigravity = FakeProvider(supportsWorkspaceTools: false) { _ in [.finished(AIResult(text: "May works."))] }
         let session = ChatSession(provider: claude, workspace: ws, server: server)
         session.configure(provider: claude, model: "sonnet", label: "Claude Sonnet")
         let oldPage = PageContext(pageID: "old", title: "Old", markdown: "Old page body")
@@ -290,23 +290,23 @@ private func tempDirectory() throws -> URL {
         session.send("failed turn", context: oldPage)
         await waitUntilIdle(session)
 
-        session.configure(provider: gemini, model: "gemini", label: "Gemini")
+        session.configure(provider: antigravity, model: "agy-model", label: "Antigravity")
         session.send("Will that month work?", context: page)
         await waitUntilIdle(session)
         session.send("Why?", context: page)
         await waitUntilIdle(session)
 
-        let first = try #require(gemini.requests.first)
-        #expect(first.model == "gemini")
+        let first = try #require(antigravity.requests.first)
+        #expect(first.model == "agy-model")
         #expect(first.resumeSessionID == nil)
         #expect(first.tools == .none)
         #expect(first.history == [AIChatTurn(user: "When is the launch?", assistant: "The launch is in May.")])
         #expect(first.prompt.contains("Current page body") && first.prompt.contains("Selected text"))
         #expect(!first.prompt.contains("Old page body"))
-        #expect(gemini.requests.last?.history.count == 2)
-        #expect(gemini.requests.last?.prompt.contains("Current page body") == true)
+        #expect(antigravity.requests.last?.history.count == 2)
+        #expect(antigravity.requests.last?.prompt.contains("Current page body") == true)
         #expect(session.messages[1].modelLabel == "Claude Sonnet")
-        #expect(session.messages[5].modelLabel == "Gemini")
+        #expect(session.messages[5].modelLabel == "Antigravity")
 
         session.configure(provider: claude, model: "opus", label: "Claude Opus")
         session.send("What did we decide?", context: page)
