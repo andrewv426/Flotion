@@ -626,6 +626,124 @@ extension SelfTest {
             record("scroll frame work, 5,000-block page (worst)", samples.max() ?? -1, budget: 16.6)
         }
 
+        // Steadiness: a row in the middle of the screen must move by exactly the scroll step, whatever
+        // happens to the heights of the rows coming into view. The run loop turns between frames, as it
+        // does in the app, so height corrections that are put off to the next turn are included.
+        if let table = find(EditorTableView.self, in: window()?.contentView), let scroll = table.enclosingScrollView {
+            let clip = scroll.contentView
+            func settle() async {
+                window()?.displayIfNeeded()
+                await Task.yield()
+                await Task.yield()
+                window()?.displayIfNeeded()
+            }
+            func jump(to y: CGFloat) async {
+                clip.scroll(to: NSPoint(x: 0, y: y))
+                scroll.reflectScrolledClipView(clip)
+                await settle()
+            }
+            /// The largest distance the middle row ended a frame away from where the scroll step put it.
+            func largestJump(from start: CGFloat, step: CGFloat, frames: Int) async -> Double {
+                await jump(to: start)
+                var worst = 0.0
+                for _ in 0..<frames {
+                    let visible = table.rows(in: table.visibleRect)
+                    let row = visible.location + visible.length / 2
+                    let before = table.rect(ofRow: row).minY - clip.bounds.minY
+                    let from = clip.bounds.minY
+                    clip.scroll(to: NSPoint(x: 0, y: from + step))
+                    scroll.reflectScrolledClipView(clip)
+                    await settle()
+                    let after = table.rect(ofRow: row).minY - clip.bounds.minY
+                    worst = max(worst, Double(abs(after - before + step)))
+                }
+                return worst
+            }
+            // Each run starts somewhere the page has not been scrolled through yet.
+            let end = table.frame.height
+            record("scroll up, rows not shown before: largest jump", await largestJump(from: end - 4_000, step: -30, frames: 300), unit: "pt", budget: 1)
+            record("flick up, rows not shown before: largest jump", await largestJump(from: end - 30_000, step: -120, frames: 200), unit: "pt", budget: 1)
+            record("flick down, rows not shown before: largest jump", await largestJump(from: end / 2, step: 120, frames: 200), unit: "pt", budget: 1)
+
+            // Changing the width (a window resize, the assistant panel opening) re-measures every row.
+            // The top row on screen must stay where it is, and a step must not stall the resize (measuring
+            // every row the table asks about on each step took 80 ms).
+            if let window = window() {
+                await jump(to: end / 3)
+                try? await Task.sleep(for: .milliseconds(400)) // rows measured in the background settle first
+                let original = window.frame
+                let row = table.rows(in: table.visibleRect).location + 1
+                let before = table.rect(ofRow: row).minY - clip.bounds.minY
+                var steps: [Double] = []
+                for k in 0..<60 {
+                    var frame = window.frame
+                    frame.size.width += k < 30 ? -6 : 6
+                    let start = CACurrentMediaTime()
+                    window.setFrame(frame, display: true)
+                    await settle()
+                    steps.append((CACurrentMediaTime() - start) * 1000)
+                }
+                window.setFrame(original, display: true)
+                await settle()
+                try? await Task.sleep(for: .milliseconds(600))
+                await settle()
+                record("width change step work, 5,000-block page (p95)", percentile(steps, 0.95), budget: 33)
+                record("width changed and back mid-page: movement of the top row", Double(abs(table.rect(ofRow: row).minY - clip.bounds.minY - before)), unit: "pt", budget: 3)
+            }
+        }
+
+        // The same steadiness with real scroll-wheel events, as a mouse wheel sends them: each is
+        // hit-tested by the window and climbs the responder chain to the scroll view, which does the
+        // scrolling itself. (The checks above set the scroll offset directly.) A trackpad cannot be
+        // stood in for this way: its events carry gesture phases, and after the first of a gesture the
+        // scroll view takes no more of them from the app, so only the first one sent from here moves the page.
+        if let window = window(), let table = find(EditorTableView.self, in: window.contentView), let scroll = table.enclosingScrollView {
+            let clip = scroll.contentView
+            /// Turns the wheel once per frame and follows a row on screen through it. Every turn must
+            /// move that row by the turn's own distance. Returns the largest miss and the distances.
+            func wheel(from start: CGFloat, turns: [CGFloat]) async -> (jump: Double, sent: Double, moved: Double) {
+                clip.scroll(to: NSPoint(x: 0, y: start))
+                scroll.reflectScrolledClipView(clip)
+                window.displayIfNeeded()
+                try? await Task.sleep(for: .milliseconds(300)) // rows measured in the background settle first
+                func middleRow() -> (row: Int, offset: CGFloat) {
+                    let visible = table.rows(in: table.visibleRect)
+                    let row = visible.location + visible.length / 2
+                    return (row, table.rect(ofRow: row).minY - clip.bounds.minY)
+                }
+                var followed = middleRow()
+                var worst = 0.0, sent = 0.0, moved = 0.0
+                for turn in turns {
+                    guard let event = TestHost.wheelEvent(over: scroll, deltaY: turn) else { continue }
+                    window.sendEvent(event)
+                    window.displayIfNeeded()
+                    await Task.yield()
+                    await Task.yield()
+                    window.displayIfNeeded()
+                    let offset = table.rect(ofRow: followed.row).minY - clip.bounds.minY
+                    worst = max(worst, Double(abs(offset - followed.offset - turn)))
+                    sent += Double(turn)
+                    moved += Double(offset - followed.offset)
+                    followed = middleRow()
+                }
+                return (worst, sent, moved)
+            }
+            // Upwards (a positive turn): slowly, then fast.
+            let turns = [CGFloat](repeating: 30, count: 150) + [CGFloat](repeating: 120, count: 100)
+            let start = table.frame.height * 0.8
+            let first = await wheel(from: start, turns: turns)
+            if abs(first.moved) < 1 {
+                failed += 1
+                lines.append("PERF OVER wheel events did not scroll the page")
+            } else {
+                record("wheel up, rows not shown before: largest jump", first.jump, unit: "pt", budget: 1)
+                // The same turns over the same rows, now all measured: what steady looks like.
+                let again = await wheel(from: start, turns: turns)
+                record("wheel up, same rows again: largest jump", again.jump, unit: "pt", budget: 1)
+                lines.append(String(format: "PERF info wheel turned %.0f pt; the page moved %.0f pt, then %.0f pt", first.sent, first.moved, again.moved))
+            }
+        }
+
         if let problem = TestHost.savedWindowProblem() {
             lines.append("PERF OVER \(problem)")
             failed += 1
