@@ -200,7 +200,9 @@ public enum DiagramTemplate {
                   stroke-width: 6px; stroke-linejoin: round; }
         .elabel.in-group { stroke: var(--fl-group); }
         .elabel.live { fill: var(--fl-accent); }
-        .token { fill: var(--fl-accent); }
+        .token { fill: var(--fl-accent); stroke: var(--fl-node); stroke-width: 1.5; }
+        .message-trail { fill: none; stroke: var(--fl-accent); stroke-width: 3; stroke-linecap: round;
+                         stroke-opacity: .55; pointer-events: none; }
 
         .cap { position: relative; height: 66px; text-align: center; overflow: hidden; }
         .cap-copy { position: absolute; inset: 8px 16px 0; }
@@ -221,7 +223,6 @@ public enum DiagramTemplate {
         .controls .dot { width: 6px; height: 6px; border-radius: 3px; background: var(--fl-node-border); transition: width .16s ease, background .16s ease; }
         .controls .dot.on { width: 16px; background: var(--fl-accent); }
         .static .cap, .static .controls { display: none; }
-        @media (prefers-reduced-motion: reduce) { .stage, .stage *, .controls button { transition: none !important; } }
         """#
 
     /// Draws a persistent scene and animates its changes as the player moves between steps.
@@ -280,8 +281,7 @@ public enum DiagramTemplate {
             return dot;
           });
 
-          const still = matchMedia('(prefers-reduced-motion: reduce)');
-          let index = 0, activeTokens = null, timer = null, captionMotion;
+          let index = 0, activeTokens = null, timer = null, captionMotion, transitionDuration = 0;
           const textMotions = new WeakMap();
           const pulses = new WeakMap();
 
@@ -325,14 +325,25 @@ public enum DiagramTemplate {
                                           { duration: 440, easing: ease }));
           }
 
+          function updateNode(n, state, animate, direction, highlight) {
+            const changed = n.label.textContent !== state.label || n.tag.textContent !== state.tag ||
+                            (n.e.dataset.tone || null) !== state.tone;
+            if (state.tone) n.e.dataset.tone = state.tone; else delete n.e.dataset.tone;
+            updateText(n.label, state.label, animate, direction * 4);
+            updateText(n.tag, state.tag, animate, direction * 5);
+            n.label.style.transform = state.tag ? 'translateY(-10px)' : '';
+            if (animate && highlight && changed && state.on && !state.dim) pulse(n.ring, .28);
+          }
+
           function go(i, animate) {
-            const previous = S.steps[index], direction = i < index ? -1 : 1;
+            const direction = i < index ? -1 : 1;
             index = i;
-            animate = animate && !still.matches;
             const step = S.steps[index];
+            transitionDuration = animate ? 260 : 0;
             updateCaption(step, animate, direction);
             if (activeTokens) {
-              // Stop traveling on paths whose geometry is about to change. Fade the old dots in place.
+              // Invalidating the group also cancels pending arrivals, so a rapid seek cannot
+              // apply an old step's labels or status to the new picture.
               const outgoing = activeTokens;
               activeTokens = null;
               if (animate && outgoing.firstChild) {
@@ -341,20 +352,15 @@ public enum DiagramTemplate {
                 outgoing.remove();
               }
             }
+            nodes.forEach(n => pulses.get(n.ring)?.cancel());
             step.groups.forEach((s, k) => { groups[k].classList.toggle('off', !s.on); groups[k].classList.toggle('dim', s.dim); });
-            const receivers = new Set(step.sends.map(send => send.to));
+            const receivers = new Set(animate ? step.sends.map(send => send.to) : []);
             step.nodes.forEach((s, k) => {
-              const n = nodes[k], before = previous.nodes[k];
+              const n = nodes[k];
               n.e.classList.toggle('off', !s.on);
               n.e.classList.toggle('dim', s.dim);
-              if (s.tone) n.e.dataset.tone = s.tone; else delete n.e.dataset.tone;
-              updateText(n.label, s.label, animate, direction * 4);
-              updateText(n.tag, s.tag, animate, direction * 5);
-              n.label.style.transform = s.tag ? 'translateY(-10px)' : '';
-              if (animate && s.on && !s.dim && !receivers.has(k) &&
-                  (s.label !== before.label || s.tag !== before.tag || s.tone !== before.tone)) {
-                pulse(n.ring, .28);
-              }
+              // Reveal the receiving node's result when its last message arrives.
+              if (!receivers.has(k)) updateNode(n, s, animate, direction, true);
             });
             step.edges.forEach((s, k) => {
               const e = edges[k];
@@ -373,31 +379,53 @@ public enum DiagramTemplate {
             $('next').disabled = index === S.steps.length - 1;
             if (animate && step.sends.length) {
               const tokens = activeTokens = gTokens.appendChild(el('g', {}));
-              step.sends.forEach((send, order) => travel(send, order, tokens, step.edges[send.edge].hi));
+              const lastArrival = new Map(step.sends.map((send, order) => [send.to, order]));
+              const started = performance.now();
+              let delay = 180; // Let new nodes and arrow directions settle before sending.
+              step.sends.forEach((send, order) => {
+                const edge = edges[send.edge], path = step.edges[send.edge].hi ? edge.hi : edge.lo;
+                const length = path.getTotalLength();
+                const duration = Math.min(1000, Math.max(600, length * 2.8));
+                travel(send, tokens, path, length, started + delay, duration, () => {
+                  if (lastArrival.get(send.to) === order) updateNode(nodes[send.to], step.nodes[send.to], true, direction, false);
+                  pulse(nodes[send.to].ring, .55);
+                });
+                delay += duration + 160;
+              });
+              transitionDuration = delay - 160 + 440;
             }
           }
 
-          // A dot runs the edge from sender to receiver, then the receiver's outline pulses once.
-          function travel(send, order, tokens, hi) {
-            const edge = edges[send.edge], path = hi ? edge.hi : edge.lo;
-            const length = path.getTotalLength();
-            const dot = tokens.appendChild(el('circle', { class: 'token', r: 3.5, opacity: 0 }));
-            const startAt = performance.now() + order * 480;
-            const duration = Math.min(650, Math.max(320, length * 2.2));
+          // A short bright trail follows each message along the actual curve, in either direction.
+          // Messages in one step travel in order; results and a receiver pulse follow each arrival.
+          function travel(send, tokens, path, length, startAt, duration, arrive) {
+            const trailLength = Math.min(36, length * .3);
+            const trail = tokens.appendChild(el('path', { class: 'message-trail', d: path.getAttribute('d'),
+              'stroke-dasharray': '0 ' + (length + 1), opacity: 0 }));
+            const dot = tokens.appendChild(el('circle', { class: 'token', r: 4.5, opacity: 0 }));
             const tick = now => {
               if (tokens !== activeTokens) return;
               const t = (now - startAt) / duration;
               if (t >= 1) {
                 dot.remove();
-                pulse(nodes[send.to].ring, .55);
+                trail.remove();
+                arrive();
+                if (!tokens.firstChild) { tokens.remove(); activeTokens = null; }
                 return;
               }
-              if (t > 0) {
-                const u = t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-                const p = path.getPointAtLength((send.forward ? u : 1 - u) * length);
+              if (t >= 0) {
+                const u = t * t * (3 - 2 * t);
+                const distance = u * length;
+                const position = send.forward ? distance : length - distance;
+                const tail = Math.min(trailLength, distance, (1 - u) * length);
+                const p = path.getPointAtLength(position);
                 dot.setAttribute('cx', p.x);
                 dot.setAttribute('cy', p.y);
-                dot.setAttribute('opacity', Math.min(1, (1 - t) * 8));
+                const opacity = Math.min(1, t * 10, (1 - t) * 10);
+                dot.setAttribute('opacity', opacity);
+                trail.setAttribute('stroke-dasharray', tail + ' ' + (length + 1));
+                trail.setAttribute('stroke-dashoffset', -(send.forward ? position - tail : position));
+                trail.setAttribute('opacity', opacity);
               }
               requestAnimationFrame(tick);
             };
@@ -422,7 +450,7 @@ public enum DiagramTemplate {
           function start() {
             if (index === S.steps.length - 1) go(0, true);
             icon(true);
-            const wait = () => 2300 + S.steps[index].sends.length * 480;
+            const wait = () => Math.max(2300, transitionDuration + 1000);
             const advance = () => {
               if (index >= S.steps.length - 1) { stop(); return; }
               go(index + 1, true);
