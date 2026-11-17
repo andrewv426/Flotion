@@ -13,6 +13,178 @@ import WebKit
 /// screen-recording permission, so it runs anywhere the app can launch.
 @MainActor
 enum SelfTest {
+    /// Runs long message chains without wall-clock waits; WebKit still supplies real SVG geometry.
+    private static func checkFlowSequence(web: WKWebView, output: URL, check: (Bool, String) -> Void) async {
+        let source = """
+            flow right
+            a: Sender
+            b: Relay
+            c: Receiver
+            a -> b -> c
+            c -> a {style: dashed}
+            step "Ready"
+            step "Exchange"
+              send a -> b: first
+              send b -> c: second
+              send c -> a: reply
+              send a -> b: last
+              tag a, b, c: arrived
+            step "Finished"
+            """
+        guard let scene = try? FlowScene(source: source) else {
+            check(false, "the message-chain fixture parses")
+            return
+        }
+        let originalFrame = web.frame
+        web.setFrameSize(NSSize(width: 720, height: scene.displayHeight(forWidth: 720)))
+        defer { web.frame = originalFrame }
+        let clock = """
+            let now = 0, frames = [], timers = [], serial = 0;
+            performance.now = () => now;
+            window.requestAnimationFrame = callback => { frames.push(callback); return ++serial; };
+            window.setTimeout = (callback, delay) => { const id = ++serial; timers.push({ id, at: now + delay, callback }); return id; };
+            window.clearTimeout = id => { timers = timers.filter(t => t.id !== id); };
+            window.flowClock = { step: () => {
+              now += 20;
+              const pending = frames; frames = []; pending.forEach(f => f(now));
+              const due = timers.filter(t => t.at <= now); timers = timers.filter(t => t.at > now);
+              due.forEach(t => t.callback());
+            } };
+            """
+        for reduced in [false, true] {
+            let setup = "window.flowReduced = \(reduced); window.matchMedia = () => ({ matches: \(reduced) });\n" + clock
+            let html = DiagramTemplate.flowDocument(scene).replacingOccurrences(of: "<script>", with: "<script>" + setup)
+            web.loadHTMLString(html, baseURL: nil)
+            for _ in 0..<100 {
+                if (try? await web.evaluateJavaScript("window.flowReduced === \(reduced) && !!window.flowClock && !!window.flotion") as? Bool) == true { break }
+                try? await Task.sleep(for: .milliseconds(20))
+            }
+            let result = try? await web.evaluateJavaScript("""
+                (() => {
+                  const scene = JSON.parse(document.getElementById('scene').textContent);
+                  const nodes = [...document.querySelectorAll('.node')];
+                  const edges = [...document.querySelectorAll('.edge')], labels = [...document.querySelectorAll('.elabel')];
+                  const arrived = i => nodes[i].querySelector('.tag').textContent === 'arrived';
+                  const running = e => e.getAnimations().some(a => a.playState === 'running');
+                  const lit = k => edges[k].classList.contains('live') && labels[k].classList.contains('live');
+                  const unlit = k => !edges[k].classList.contains('live') && !labels[k].classList.contains('live');
+                  // Every node and arrow shows exactly the given step's resolved state.
+                  const matches = i => {
+                    const step = scene.steps[i];
+                    return step.nodes.every((s, k) => {
+                      const n = nodes[k];
+                      return n.classList.contains('off') === !s.on && n.classList.contains('dim') === s.dim &&
+                        n.querySelector('.label').textContent === s.label && n.querySelector('.tag').textContent === s.tag &&
+                        (n.dataset.tone ?? null) === (s.tone ?? null);
+                    }) && step.edges.every((s, k) =>
+                      edges[k].classList.contains('off') === !s.on && edges[k].classList.contains('dim') === s.dim &&
+                      edges[k].classList.contains('at-hi') === s.hi && labels[k].textContent === s.label && (s.live ? lit(k) : unlit(k)));
+                  };
+                  const initial = matches(0);
+                  window.flotion.go(1);
+                  const sends = scene.steps[1].sends, senders = [0, 1, 2, 0];
+                  const sendDots = [...document.querySelectorAll('.token')];
+                  // Arrows carrying a message wait for it; each lights the moment its message leaves.
+                  let liveOnDeparture = sendDots.length === sends.length && sends.every(s => unlit(s.edge));
+                  let emits = true, responds = true, landings = 0, growsIn = true, absorbs = true, absorbing = false;
+                  const departed = new Set(), landed = new Set();
+                  document.getElementById('play').click();
+                  let serial = true, held = true, curve = false, lastReceiver = true, traveled = false;
+                  let completedAt = null;
+                  for (let frame = 0; frame < 400; frame++) {
+                    window.flowClock.step();
+                    const dots = [...document.querySelectorAll('.token')];
+                    const visible = dots.filter(d => +d.getAttribute('opacity') > .5);
+                    serial &&= visible.length <= 1;
+                    traveled ||= visible.length > 0;
+                    curve ||= visible.some(d => Math.abs(+d.getAttribute('cy') - \(scene.nodes[0].y)) > 10);
+                    if (window.flotion.index() === 1) {
+                      sendDots.forEach((d, j) => {
+                        if (d.hasAttribute('cx') && !departed.has(j)) {
+                          departed.add(j);
+                          emits &&= running(nodes[senders[j]].querySelector('.ring'));
+                          growsIn &&= +d.getAttribute('r') < 3;
+                        }
+                        const opacity = +d.getAttribute('opacity'), r = +d.getAttribute('r');
+                        if (d.isConnected && opacity > 0 && opacity < 1) { absorbing = true; absorbs &&= r >= 2 && r < 4.5; }
+                        if (!d.isConnected && !landed.has(j)) {
+                          landed.add(j);
+                          landings++;
+                          const receiver = nodes[sends[j].to];
+                          responds &&= running(receiver.querySelector('.inner')) && running(receiver.querySelector('.ring'));
+                        }
+                      });
+                      liveOnDeparture &&= sends.every(s => sends.some((o, j) => o.edge === s.edge && departed.has(j)) ? lit(s.edge) : unlit(s.edge));
+                    }
+                    if (dots.length > 0) {
+                      held &&= window.flotion.index() === 1;
+                      lastReceiver &&= !arrived(1);
+                    } else if (completedAt === null) completedAt = frame;
+                    if (completedAt !== null && frame - completedAt < 50) held &&= window.flotion.index() === 1;
+                  }
+                  const finished = serial && held && curve && lastReceiver && traveled && completedAt !== null &&
+                    nodes.every((_, i) => arrived(i)) && !document.querySelector('.message-trail') && window.flotion.index() === 2;
+                  const after = matches(2);
+                  // A seek the moment a message lands cancels the receiver's bump and pulse.
+                  window.flotion.go(0);
+                  window.flotion.go(1);
+                  let landing = false;
+                  for (let i = 0; i < 100 && !landing; i++) {
+                    window.flowClock.step();
+                    landing = running(nodes[1].querySelector('.inner'));
+                  }
+                  window.flotion.go(0);
+                  const cancelled = landing && nodes.every(n => !running(n.querySelector('.inner')) && !running(n.querySelector('.ring')));
+                  // Seeks in mid-journey settle on the target step's own state, with no arrow left unlit.
+                  for (let i = 0; i < 250; i++) window.flowClock.step();
+                  let settled = matches(0);
+                  window.flotion.go(1);
+                  for (let i = 0; i < 30; i++) window.flowClock.step();
+                  window.flotion.go(2);
+                  for (let i = 0; i < 250; i++) window.flowClock.step();
+                  settled &&= matches(2);
+                  window.flotion.go(0);
+                  window.flotion.go(1);
+                  for (let i = 0; i < 30; i++) window.flowClock.step();
+                  window.flotion.go(0);
+                  window.flotion.go(1);
+                  for (let i = 0; i < 300; i++) window.flowClock.step();
+                  settled &&= matches(1);
+                  window.flotion.go(0);
+                  for (let i = 0; i < 250; i++) window.flowClock.step();
+                  document.getAnimations().forEach(a => a.finish());
+                  settled &&= matches(0) && window.flotion.index() === 0;
+                  return { journey: finished && initial && after, live: liveOnDeparture && departed.size === sends.length,
+                           respond: emits && responds && landings === sends.length && growsIn && absorbs && absorbing,
+                           cancelled, settled };
+                })()
+                """) as? [String: Bool]
+            let label = reduced ? " (with macOS Reduce Motion enabled)" : ""
+            check(result?["journey"] == true, "ordered curved journeys commit on arrival and finish before autoplay advances" + label)
+            check(result?["live"] == true, "an arrow carrying a message stays unlit until the message departs, then lights" + label)
+            check(result?["respond"] == true, "a message grows out of a pulsing sender and shrinks into a receiver that bumps and pulses" + label)
+            check(result?["cancelled"] == true, "a seek cancels the receiver's bump and pulse" + label)
+            check(result?["settled"] == true, "seeks mid-journey settle every node and arrow on the target step's state" + label)
+            if !reduced {
+                for (name, script) in [
+                    ("06b-flow-before", "window.flotion.go(0)"),
+                    // The reply a third of the way round the long dashed loop, where its tail is at full length.
+                    ("06c-flow-travel", "window.flotion.go(1); const reply = document.querySelectorAll('.edge')[2];" +
+                        "for (let i = 0; i < 400 && !reply.classList.contains('live'); i++) window.flowClock.step();" +
+                        "for (let i = 0; i < 18; i++) window.flowClock.step()")
+                ] {
+                    // The page's own background, so the picture reads the same on any backdrop.
+                    _ = try? await web.evaluateJavaScript(script + "; document.getAnimations().forEach(a => a.finish());" +
+                        "document.body.style.background = getComputedStyle(document.documentElement).getPropertyValue('--fl-bg')")
+                    if let image = try? await web.takeSnapshot(configuration: nil), let tiff = image.tiffRepresentation,
+                       let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+                        try? png.write(to: output.appendingPathComponent("\(name).png"))
+                    }
+                }
+            }
+        }
+    }
+
     static func run(model: AppModel, output: URL) async {
         try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         var failures: [String] = []
@@ -247,19 +419,17 @@ enum SelfTest {
                         button.click();
                         seen.push(window.flotion.index() + ':' + title.textContent);
                       }
-                      const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
                       const caption = document.getElementById('caption');
                       const outgoing = document.querySelectorAll('.cap-copy[aria-hidden="true"]');
                       const animated = caption.getAnimations().length > 0;
-                      return { sequence: seen.join('|'), motion: reduced
-                        ? !animated && outgoing.length === 0
-                        : animated && outgoing.length > 0 && [...outgoing].every(copy => !copy.querySelector('[id]')) };
+                      return { sequence: seen.join('|'), motion:
+                        animated && outgoing.length > 0 && [...outgoing].every(copy => !copy.querySelector('[id]')) };
                     })()
                     """) as? [String: Any]
                 let captions = sequence?["sequence"] as? String
                 check(captions == "1:SYN-ACK|2:ACK|1:SYN-ACK|0:SYN|1:SYN-ACK|2:ACK",
                       "rapid diagram clicks update the step and caption together, got \(String(describing: captions))")
-                check(sequence?["motion"] as? Bool == true, "caption motion respects reduced motion and keeps outgoing text out of accessibility")
+                check(sequence?["motion"] as? Bool == true, "caption motion stays animated and keeps outgoing text out of accessibility")
                 await pause(900)
                 let settled = try? await web.evaluateJavaScript("document.querySelectorAll('.cap-copy').length === 1") as? Bool
                 check(settled == true, "interrupted caption animations clean up after settling")
@@ -268,6 +438,55 @@ enum SelfTest {
                 let head = try? await web.evaluateJavaScript("document.querySelector('.edge').classList.contains('at-hi')") as? Bool
                 check(head == true, "the arrowhead is at the server end on the final ACK")
                 await webSnapshot("06-diagram-step3")
+                _ = try? await web.evaluateJavaScript("document.getElementById('prev').click()")
+                await pause(360)
+                await webSnapshot("06a-diagram-reply-travel")
+                let journey = try? await web.callAsyncJavaScript("""
+                    const receiver = document.querySelectorAll('.node')[0];
+                    const tag = () => receiver.querySelector('.tag').textContent;
+                    const pending = tag() === 'established';
+                    const samples = [];
+                    const deadline = performance.now() + 3000;
+                    while (performance.now() < deadline) {
+                      await new Promise(requestAnimationFrame);
+                      const dot = document.querySelector('.token');
+                      if (!dot) break;
+                      if (+dot.getAttribute('opacity') > .5) {
+                        samples.push({ x: +dot.getAttribute('cx'), pending: tag() === 'established',
+                          trail: +document.querySelector('.message-trail').getAttribute('stroke-dasharray').split(' ')[0] > 0 });
+                      }
+                    }
+                    return { pending, samples: samples.length,
+                      movedBack: samples.length > 1 && samples[0].x > samples[samples.length - 1].x,
+                      stayedPending: samples.every(s => s.pending), trail: samples.some(s => s.trail),
+                      arrived: tag() === 'SYN sent', cleaned: !document.querySelector('.message-trail'),
+                      pulse: receiver.querySelector('.ring').getAnimations().some(a => a.playState === 'running') &&
+                        receiver.querySelector('.inner').getAnimations().some(a => a.playState === 'running') };
+                    """, arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
+                check(journey?["pending"] as? Bool == true && journey?["stayedPending"] as? Bool == true,
+                          "a receiver keeps its previous status while the message is traveling")
+                check(journey?["movedBack"] as? Bool == true && journey?["trail"] as? Bool == true,
+                          "the reply visibly travels backward along the arrow with a tapering trail")
+                check(journey?["arrived"] as? Bool == true && journey?["pulse"] as? Bool == true && journey?["cleaned"] as? Bool == true,
+                          "arrival reveals the receiving status, pulses and bumps the receiver and removes the travel graphics")
+                // Interrupt a reply, jump with a dot, then go back with the keyboard. Only the
+                // latest destination may commit a delayed receiver update.
+                _ = try? await web.evaluateJavaScript("document.getElementById('next').click()")
+                await pause(300)
+                _ = try? await web.evaluateJavaScript("""
+                    document.querySelectorAll('.dot')[0].click();
+                    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+                    """)
+                await pause(1000)
+                let interrupted = try? await web.evaluateJavaScript("""
+                    window.flotion.index() === 1 && document.getElementById('cap-title').textContent === 'SYN-ACK' &&
+                    [...document.querySelectorAll('.node .tag')].map(n => n.textContent).join('|') === 'SYN sent|SYN received' &&
+                    [...document.querySelectorAll('.node')].every(n => !n.dataset.tone) &&
+                    !document.querySelector('.token, .message-trail')
+                    """) as? Bool
+                check(interrupted == true, "interrupting a journey via arrows, dots and keyboard cannot apply a stale arrival")
+                _ = try? await web.evaluateJavaScript("window.flotion.go(2)")
+                await pause(1000)
                 if let scroll = web.enclosingScrollView, let table = scroll.documentView as? EditorTableView,
                    let controller = table.editor, let editor = model.editor,
                    let diagram = editor.blocks.last, let w = table.window {
@@ -322,6 +541,11 @@ enum SelfTest {
                           "Escape clears the diagram selection and returns to text")
                 } else {
                     check(false, "the player is hosted in the editor table")
+                }
+                await checkFlowSequence(web: web, output: output, check: check)
+                if let scene = try? FlowScene(source: source) {
+                    web.loadHTMLString(DiagramTemplate.flowDocument(scene), baseURL: nil)
+                    await pause(300)
                 }
             } else {
                 check(false, "a web view exists for the visible diagram block")
