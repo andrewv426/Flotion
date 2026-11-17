@@ -267,7 +267,7 @@ enum SelfTest {
                 let head = try? await web.evaluateJavaScript("document.querySelector('.edge').classList.contains('at-hi')") as? Bool
                 check(head == true, "the arrowhead is at the server end on the final ACK")
                 await webSnapshot("06-diagram-step3")
-                if let table = web.enclosingScrollView?.documentView as? EditorTableView,
+                if let scroll = web.enclosingScrollView, let table = scroll.documentView as? EditorTableView,
                    let controller = table.editor, let editor = model.editor,
                    let diagram = editor.blocks.last, let w = table.window {
                     let row = editor.blocks.count
@@ -275,6 +275,34 @@ enum SelfTest {
                     let webPoint = table.convert(NSPoint(x: web.bounds.midX, y: web.bounds.midY), from: web)
                     let hit = table.hitTest(table.convert(webPoint, to: table.superview))
                     check(hit === web || hit?.isDescendant(of: web) == true, "the interactive diagram receives clicks inside the player")
+                    let clip = scroll.contentView
+                    let original = clip.bounds.origin
+                    clip.scroll(to: NSPoint(x: 0, y: table.frame.height - clip.bounds.height))
+                    scroll.reflectScrolledClipView(clip)
+                    w.displayIfNeeded()
+                    let bottom = clip.bounds.minY
+                    if web.visibleRect.contains(NSPoint(x: web.bounds.midX, y: web.bounds.midY)),
+                       let wheel = TestHost.wheelEvent(over: web, deltaY: 40) {
+                        // Dequeue the event so AppKit exposes it as the current event during hit-testing.
+                        NSApp.postEvent(wheel, atStart: true)
+                        if let queuedWheel = NSApp.nextEvent(matching: .scrollWheel, until: .distantPast, inMode: .default, dequeue: true) {
+                            let wheelPoint = table.convert(queuedWheel.locationInWindow, from: nil)
+                            check(table.hitTest(table.convert(wheelPoint, to: table.superview)) === table,
+                                  "a wheel event over the interactive diagram targets the editor directly")
+                            w.sendEvent(queuedWheel)
+                        }
+                        await waitFor(1) { clip.bounds.minY < bottom }
+                        check(clip.bounds.minY < bottom, "a wheel turn over the interactive diagram scrolls the page")
+                    } else {
+                        check(false, "the interactive diagram is visible for the wheel test")
+                    }
+                    let top = clip.constrainBoundsRect(clip.bounds.offsetBy(dx: 0, dy: -table.bounds.height)).minY
+                    clip.setBoundsOrigin(NSPoint(x: original.x, y: top - 40))
+                    check(abs(clip.bounds.minY - top) <= 0.5, "the editor clamps a scroll step past the top of the page")
+                    clip.setBoundsOrigin(NSPoint(x: original.x, y: bottom + 40))
+                    check(abs(clip.bounds.minY - bottom) <= 0.5, "the editor clamps a scroll step past the bottom of the page")
+                    clip.scroll(to: original)
+                    scroll.reflectScrolledClipView(clip)
                     if let click = NSEvent.mouseEvent(with: .leftMouseDown, location: table.convert(webPoint, to: nil),
                                                        modifierFlags: [.command, .shift], timestamp: 0, windowNumber: w.windowNumber,
                                                        context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {

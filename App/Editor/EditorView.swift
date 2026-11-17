@@ -41,6 +41,42 @@ struct EditorView: NSViewRepresentable {
     }
 }
 
+final class EditorScrollView: NSScrollView {
+    // AppKit's responsive scrolling can bypass scrollWheel(with:) after a gesture starts.
+    override class var isCompatibleWithResponsiveScrolling: Bool { false }
+
+    override func scrollWheel(with event: NSEvent) {
+        let deltaY = event.scrollingDeltaY
+        if event.momentumPhase == .began || event.momentumPhase == .changed,
+           deltaY != 0 {
+            let bounds = contentView.bounds
+            let direction: CGFloat = deltaY > 0 ? -1 : 1
+            let next = contentView.constrainBoundsRect(bounds.offsetBy(dx: 0, dy: direction))
+            if next.minY == bounds.minY { return }
+        }
+        // Apply a phase-less pixel wheel turn immediately so AppKit cannot coalesce it with the next turn.
+        if event.phase.isEmpty, event.momentumPhase.isEmpty, event.hasPreciseScrollingDeltas,
+           deltaY != 0, event.scrollingDeltaX == 0, !event.modifierFlags.contains(.shift) {
+            let clip = contentView
+            let next = clip.constrainBoundsRect(clip.bounds.offsetBy(dx: 0, dy: -deltaY))
+            clip.scroll(to: next.origin)
+            reflectScrolledClipView(clip)
+            return
+        }
+        super.scrollWheel(with: event)
+    }
+
+    func constrainVerticalScrollPosition() {
+        let clip = contentView
+        let bounds = clip.bounds
+        let y = clip.constrainBoundsRect(bounds).minY
+        // A fast momentum step can cross the edge even with elasticity disabled.
+        guard abs(y - bounds.minY) > 0.5 else { return }
+        clip.scroll(to: NSPoint(x: bounds.minX, y: y))
+        reflectScrolledClipView(clip)
+    }
+}
+
 final class EditorTableView: NSTableView {
     var onWidthChange: (() -> Void)?
     weak var editor: EditorController?
@@ -107,7 +143,9 @@ final class EditorTableView: NSTableView {
         if modifiers.contains([.command, .shift]) || modifiers.contains(.control) || event?.type == .rightMouseDown {
             return (cell, cell)
         }
-        return (cell, cell.interactiveHit(at: localPoint) ?? cell)
+        guard let target = cell.interactiveHit(at: localPoint) else { return (cell, cell) }
+        // Keep both scrolling and momentum on AppKit's native responder chain.
+        return (cell, event?.type == .scrollWheel ? self : target)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -123,7 +161,7 @@ final class EditorTableView: NSTableView {
 
 @MainActor
 final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextViewDelegate {
-    let scrollView = NSScrollView()
+    let scrollView = EditorScrollView()
     let table = EditorTableView()
     private(set) var state: EditorState?
     private(set) var selectedDiagramID: String?
@@ -201,12 +239,14 @@ final class EditorController: NSObject, NSTableViewDataSource, NSTableViewDelega
         table.onWidthChange = { [weak self] in self?.widthChanged() }
         scrollView.documentView = table
         scrollView.hasVerticalScroller = true
+        scrollView.verticalScrollElasticity = .none
         scrollView.drawsBackground = true
         scrollView.backgroundColor = Theme.page
         // The slash menu is its own window, so it follows the "/" when the page scrolls.
         scrollView.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
+                self?.scrollView.constrainVerticalScrollPosition()
                 self?.slashMenu?.reposition()
                 self?.refreshNearRows()
                 self?.scheduleResolveAhead()
