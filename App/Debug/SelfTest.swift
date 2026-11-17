@@ -296,6 +296,11 @@ enum SelfTest {
                     } else {
                         check(false, "the interactive diagram is visible for the wheel test")
                     }
+                    let top = clip.constrainBoundsRect(clip.bounds.offsetBy(dx: 0, dy: -table.bounds.height)).minY
+                    clip.setBoundsOrigin(NSPoint(x: original.x, y: top - 40))
+                    check(abs(clip.bounds.minY - top) <= 0.5, "the editor clamps a scroll step past the top of the page")
+                    clip.setBoundsOrigin(NSPoint(x: original.x, y: bottom + 40))
+                    check(abs(clip.bounds.minY - bottom) <= 0.5, "the editor clamps a scroll step past the bottom of the page")
                     clip.scroll(to: original)
                     scroll.reflectScrolledClipView(clip)
                     if let click = NSEvent.mouseEvent(with: .leftMouseDown, location: table.convert(webPoint, to: nil),
