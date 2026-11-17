@@ -9,6 +9,10 @@ import AppKit
 /// - its windows are transparent, pushed off-screen and ignore the mouse, while AppKit still lays out and draws them;
 /// - checks that need keyboard focus cannot run, so `SelfTest` skips them and lists them in result.txt.
 /// - App Nap is held off so timers and timings are not throttled while it is out of sight.
+///
+/// A test run is the same app as a normal launch, so it must not restore or save windows. The scripts pass
+/// `-ApplePersistenceIgnoreState YES`. Every test window is also non-restorable: macOS sometimes activates a
+/// background run, and the off-screen window would otherwise be what the next normal launch opens.
 @MainActor
 enum TestHost {
     private static let environment = ProcessInfo.processInfo.environment
@@ -70,6 +74,22 @@ enum TestHost {
     /// How often a background run was made active (and gave focus back).
     private(set) static var focusTakenCount = 0
 
+    /// Nil when this process cannot restore or save a window. A test that fails this can leave the next
+    /// normal launch off the bottom-left corner of the screen.
+    static func savedWindowProblem() -> String? {
+        let arguments = ProcessInfo.processInfo.arguments
+        let ignoresSavedState = zip(arguments, arguments.dropFirst()).contains {
+            $0 == "-ApplePersistenceIgnoreState" && $1 == "YES"
+        }
+        if !ignoresSavedState {
+            return "a test run must be launched with -ApplePersistenceIgnoreState YES"
+        }
+        if NSApp.windows.contains(where: \.isRestorable) {
+            return "a test window is restorable, so its position can be saved for the next launch"
+        }
+        return nil
+    }
+
     private static func prepareWindows() {
         NSApp.windows.forEach(prepare)
     }
@@ -77,6 +97,9 @@ enum TestHost {
     /// Stops a test window saving its frame over the user's, and in background mode hides it.
     /// Safe to call again on the same window: it only changes what is not already set.
     private static func prepare(_ window: NSWindow) {
+        // Clearing the autosave name only stops the preferences frame. The window is still restorable,
+        // which is the record a later launch restores.
+        window.isRestorable = false
         if window.parent == nil, !window.frameAutosaveName.isEmpty { window.setFrameAutosaveName("") }
         guard isBackground else { return }
         // macOS's own text-input helpers (autocorrect and completion bubbles, the input-source

@@ -356,6 +356,11 @@ enum SelfTest {
             snapshot("04-welcome")
         }
 
+        if let problem = TestHost.savedWindowProblem() {
+            check(false, problem)
+        } else {
+            check(true, "a test run does not restore or save the window")
+        }
         if TestHost.focusTakenCount > 0 {
             log.append("note macOS made the background app active \(TestHost.focusTakenCount) time(s); it gave focus straight back")
         }
@@ -397,8 +402,9 @@ extension SelfTest {
         if let page = model.pages.first(where: { $0.title == "One thousand" }) { await model.open(page.id) }
         try? await Task.sleep(for: .seconds(2))
         let megabytes = residentMegabytes()
-        let ok = megabytes <= 150 && model.editor?.blocks.count == 1_000
-        let line = String(format: "PERF %@ memory, fresh launch with a 1,000-block page open: %.1f MB (budget 150)", ok ? "ok  " : "OVER", megabytes)
+        let savedWindow = TestHost.savedWindowProblem()
+        let ok = savedWindow == nil && megabytes <= 150 && model.editor?.blocks.count == 1_000
+        let line = savedWindow.map { "PERF OVER \($0)" } ?? String(format: "PERF %@ memory, fresh launch with a 1,000-block page open: %.1f MB (budget 150)", ok ? "ok  " : "OVER", megabytes)
         try? line.write(to: output.appendingPathComponent("memory.txt"), atomically: true, encoding: .utf8)
         exit(ok ? 0 : 1)
     }
@@ -506,6 +512,10 @@ extension SelfTest {
             record("scroll frame work, 5,000-block page (worst)", samples.max() ?? -1, budget: 16.6)
         }
 
+        if let problem = TestHost.savedWindowProblem() {
+            lines.append("PERF OVER \(problem)")
+            failed += 1
+        }
         lines.append(String(format: "PERF info memory at the end of this stress run: %.1f MB", residentMegabytes()))
         _ = medium // measured separately, in a fresh launch (runMemory)
 
