@@ -74,7 +74,7 @@ step "Respond": The API returns the feed to the browser.
 
 - `flow right` and `flow down` set the layout direction. Declare each node before referencing its ID in an arrow or step.
 - `group` draws a boundary around related nodes. `step "Title": caption` adds a frame to the player and starts that step’s list of changes.
-- `send` animates a message along an existing arrow in either direction, and `focus` dims the surrounding nodes for that step. Changes made with `tag`, `mark`, `set`, `hide`, and `show` carry forward.
+- `send` animates a message along an existing arrow in either direction, and `focus` dims the surrounding nodes for that step. Multiple `send` lines in one step travel concurrently (at most one per edge); put sequential hops in separate steps. Changes made with `tag`, `mark`, `set`, `hide`, and `show` carry forward.
 
 To try an example, open the assistant with ⌘J and ask it to insert a diagram in the current page using the pasted Flow source. From an MCP client, call `create_diagram` with `page_id`, `title`, and the Flow text as `source`.
 

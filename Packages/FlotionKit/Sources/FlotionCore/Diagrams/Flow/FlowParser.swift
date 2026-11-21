@@ -33,6 +33,7 @@ private struct Reader {
     private var nodeAt: [String: Int] = [:]
     private var groupAt: [String: Int] = [:]
     private var openGroup: Int?
+    private var stepSendEdges: Set<Int> = []
 
     private static let verbs: Set<String> = ["show", "hide", "set", "tag", "mark", "send", "focus"]
     private static let reserved = verbs.union(["flow", "group", "step"])
@@ -119,6 +120,7 @@ private struct Reader {
         if title.isEmpty { fail(line, "a step needs a title: `step \"Title\": caption`") }
         if diagram.steps.count >= FlowParser.maxSteps { return fail(line, "a diagram can have at most \(FlowParser.maxSteps) steps") }
         diagram.steps.append(FlowStep(title: title, caption: caption.trimmingCharacters(in: .whitespaces), line: line))
+        stepSendEdges.removeAll(keepingCapacity: true)
     }
 
     // MARK: Step verbs
@@ -156,6 +158,11 @@ private struct Reader {
             guard let found = edge(from: pair.0, to: pair.1) else {
                 return fail(line, "no edge between `\(pair.0)` and `\(pair.1)`. Declare `\(pair.0) -> \(pair.1)` first")
             }
+            if stepSendEdges.contains(found.index) {
+                let existing = diagram.edges[found.index]
+                return fail(line, "edge `\(existing.from) -> \(existing.to)` already has a `send` in this step; an edge can only carry one `send` per step. Use separate steps for sequential messages")
+            }
+            stepSendEdges.insert(found.index)
             let label = value.flatMap { $0.isEmpty ? nil : $0 }
             if let label { diagram.edges[found.index].labels.append(label) }
             diagram.steps[step].ops.append(.send(edge: found.index, against: found.against, label: label, to: pair.1))

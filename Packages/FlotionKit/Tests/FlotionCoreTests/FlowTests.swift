@@ -137,6 +137,8 @@ private let growth = """
         ("flow LR\na: A", 1, "did you mean `flow right`?"),
         ("a: A\nsend a -> a", 2, "only works inside a step"),
         ("a: A\nb: B\nstep \"One\"\n  send a -> b: hi", 4, "Declare `a -> b` first"),
+        ("a: A\nb: B\na -> b\nstep \"One\"\n  send a -> b: first\n  send a -> b: second", 6, "one `send` per step"),
+        ("a: A\nb: B\na -> b\nstep \"One\"\n  send a -> b: req\n  send b -> a: res", 6, "one `send` per step"),
         ("a: A\nstep \"One\"\n  mark a: green", 3, "did you mean `good`?"),
         ("a: A\nstep \"One\"\n  focus b", 3, "unknown node or group `b`"),
         ("group g \"G\" {\n  a: A", 1, "never closed"),
@@ -153,6 +155,59 @@ private let growth = """
         #expect(issues.map(\.line) == [1, 2, 3])
         #expect(FlowIssue.report(issues).hasPrefix("The diagram source has 3 problems."))
         #expect(FlowIssue.report(issues).contains("line 2: unknown node `b`"))
+    }
+
+    @Test func rejectsSameEdgeDuplicateSendsInOneStepAndAllowsAcrossSteps() {
+        let sameDirection = FlowParser.parse("""
+            a: A
+            b: B
+            a -> b
+            step "One"
+              send a -> b: first
+              send a -> b: second
+            """).issues
+        #expect(sameDirection.count == 1)
+        #expect(sameDirection[0].line == 6)
+        #expect(sameDirection[0].message.contains("one `send` per step"))
+        #expect(sameDirection[0].message.contains("separate steps"))
+
+        let oppositeDirection = FlowParser.parse("""
+            a: A
+            b: B
+            a -> b
+            step "One"
+              send a -> b: req
+              send b -> a: res
+            """).issues
+        #expect(oppositeDirection.count == 1)
+        #expect(oppositeDirection[0].line == 6)
+        #expect(oppositeDirection[0].message.contains("one `send` per step"))
+        #expect(oppositeDirection[0].message.contains("separate steps"))
+
+        let acrossSteps = FlowParser.parse("""
+            a: A
+            b: B
+            a -> b
+            step "First"
+              send a -> b: first
+            step "Second"
+              send a -> b: second
+            step "Reply"
+              send b -> a: reply
+            """)
+        #expect(acrossSteps.issues.isEmpty, "\(acrossSteps.issues)")
+        #expect(acrossSteps.diagram.steps.count == 3)
+
+        let separateOppositeEdges = FlowParser.parse("""
+            a: A
+            b: B
+            a -> b
+            b -> a {style: dashed}
+            step "Duplex"
+              send a -> b: out
+              send b -> a: back
+            """)
+        #expect(separateOppositeEdges.issues.isEmpty, "\(separateOppositeEdges.issues)")
     }
 }
 
@@ -188,6 +243,40 @@ private let growth = """
         let states = FlowParser.parse(pipeline).diagram.states()
         #expect(states.count == 1)
         #expect(states[0].nodes.allSatisfy(\.visible) && states[0].sends.isEmpty)
+    }
+
+    @Test func fanOutAndFanInResolveMultipleSendsInOneStep() {
+        let source = """
+            flow right
+            a: Source
+            b: Relay
+            c: Worker
+            d: Join
+            a -> b -> c -> d
+            a -> d {style: dashed}
+            step "Fan-out"
+              send a -> b: left
+              send a -> d: direct
+            step "Fan-in"
+              send a -> d: long
+              send c -> d: short
+              tag d: done
+            """
+        let (diagram, issues) = FlowParser.parse(source)
+        #expect(issues.isEmpty, "\(issues)")
+        let states = diagram.states()
+        #expect(states.count == 2)
+        #expect(states[0].sends == [
+            FlowState.Send(edge: 0, against: false, to: "b"),
+            FlowState.Send(edge: 3, against: false, to: "d"),
+        ])
+        #expect(states[0].edges.map(\.live) == [true, false, false, true])
+        #expect(states[1].sends == [
+            FlowState.Send(edge: 3, against: false, to: "d"),
+            FlowState.Send(edge: 2, against: false, to: "d"),
+        ])
+        #expect(states[1].edges.map(\.live) == [false, false, true, true])
+        #expect(states[1].nodes[3].tag == "done")
     }
 }
 
@@ -304,6 +393,44 @@ private let growth = """
         #expect(throws: FlotionError.invalid("The diagram source has 1 problem. Fix and send it again.\nline 2: unknown node `b`. Declare it first: `b: Label`")) {
             try FlowScene(source: "a: A\na -> b")
         }
+    }
+
+    @Test func resolvesConcurrentFanOutAndFanInSteps() throws {
+        let source = """
+            flow right
+            a: Source
+            b: Relay
+            c: Worker
+            d: Join
+            a -> b -> c -> d
+            a -> d {style: dashed}
+            step "Concurrent"
+              send a -> d: long
+              send a -> b: fanout
+              send c -> d: short
+              tag b, d: arrived
+              mark d: good
+            """
+        let scene = try FlowScene(source: source)
+        #expect(scene.steps.count == 1)
+        #expect(scene.steps[0].sends == [
+            FlowScene.Send(edge: 3, forward: true, to: 3),
+            FlowScene.Send(edge: 0, forward: true, to: 1),
+            FlowScene.Send(edge: 2, forward: true, to: 3),
+        ])
+        #expect(scene.steps[0].edges.map(\.live) == [true, false, true, true])
+        #expect(scene.steps[0].nodes[1].tag == "arrived")
+        #expect(scene.steps[0].nodes[3].tag == "arrived" && scene.steps[0].nodes[3].tone == "good")
+
+        let (diagram, _) = FlowParser.parse(source)
+        let layout = FlowLayout.compute(diagram)
+        func polylineLength(_ points: [FlowPoint]) -> Double {
+            zip(points, points.dropFirst()).reduce(0) { $0 + hypot($1.1.x - $1.0.x, $1.1.y - $1.0.y) }
+        }
+        let longLength = polylineLength(layout.edges[3].points)
+        let shortLength = polylineLength(layout.edges[2].points)
+        #expect(longLength > 350 && shortLength < 200, "long fan-in edge (\(longLength)) must outlast short fan-in edge (\(shortLength))")
+        #expect(layout.edges[3].points.contains { abs($0.y - layout.nodes[0].y) > 10 }, "long edge curves around intermediate nodes")
     }
 
     @Test func numbersAreShortAndExact() {

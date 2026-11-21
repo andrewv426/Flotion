@@ -41,10 +41,11 @@ private let diagramGuide = """
       x: New node                              a node or edge declared in a step appears at that step
 
     Rules: ids use letters, digits, _ and -. Declare a node before using it. `send` needs a declared edge between \
-    the two nodes (either direction) and may go against it, as a reply does. `send` and `focus` last for their step \
-    only; tag, mark, set, hide and show carry on until changed. `# ` starts a comment. A diagram without steps is a \
-    still picture. Keep labels to a few words and put the explanation in step captions; 3 to 8 nodes and 3 to 6 \
-    steps reads best.
+    the two nodes (either direction) and may go against it, as a reply does. Multiple `send` lines in one step \
+    travel concurrently (at most one `send` per edge in a step); put sequential hops in separate steps. `send` and \
+    `focus` last for their step only; tag, mark, set, hide and show carry on until changed. `# ` starts a comment. \
+    A diagram without steps is a still picture. Keep labels to a few words and put the explanation in step captions; \
+    3 to 8 nodes and 3 to 6 steps reads best.
 
     Example:
     flow right
