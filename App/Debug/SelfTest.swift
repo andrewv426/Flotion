@@ -835,6 +835,16 @@ enum SelfTest {
         } else {
             check(true, "a test run does not restore or save the window")
         }
+        if TestHost.isBackground {
+            let focusBefore = TestHost.focusTakenCount
+            let handled = NSApp.delegate?.applicationShouldHandleReopen?(NSApp, hasVisibleWindows: true)
+            check(handled == false && !NSApp.isActive && TestHost.focusTakenCount == focusBefore,
+                  "Dock reopen is ignored during a background test run")
+        } else if needsFocus("Dock reopen brings the main window forward") {
+            let handled = NSApp.delegate?.applicationShouldHandleReopen?(NSApp, hasVisibleWindows: true)
+            check(handled == true && window()?.isKeyWindow == true,
+                  "Dock reopen brings the main window forward and makes it key")
+        }
         // Run the follow-up edit checks after the focus-sensitive editor interactions.
         if let ai = model.ai, let smokeID = model.pages.first(where: { $0.title == "Smoke test" })?.id {
             await model.open(smokeID)

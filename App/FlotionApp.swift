@@ -1,3 +1,4 @@
+import AppKit
 import FlotionCore
 import SwiftUI
 
@@ -16,11 +17,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        #if DEBUG || SELFTEST
+        if TestHost.isBackground { return false }
+        #endif
+        sender.activate()
+        if let window = mainWindow(in: sender) {
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            window.makeKeyAndOrderFront(nil)
+        }
+        return true
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         model?.flushNow()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    @MainActor
+    private func mainWindow(in app: NSApplication) -> NSWindow? {
+        let candidates = app.windows.filter {
+            !($0 is NSPanel) && $0.parent == nil && $0.canBecomeMain
+        }
+        if let main = candidates.first(where: {
+            $0.identifier?.rawValue == "main" || $0.identifier?.rawValue.hasPrefix("main-") == true
+        }) {
+            return main
+        }
+        if let main = app.mainWindow, candidates.contains(main) {
+            return main
+        }
+        return candidates.first { $0.isVisible || $0.isMiniaturized } ?? candidates.first
+    }
 }
 
 @main

@@ -44,6 +44,13 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: Flotion
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
         INFOPLIST_KEY_NSHumanReadableCopyright: ""
+      configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: app.flotion.Flotion.dev
+          INFOPLIST_KEY_CFBundleDisplayName: Flotion Dev
+        Release:
+          PRODUCT_BUNDLE_IDENTIFIER: app.flotion.Flotion
+          INFOPLIST_KEY_CFBundleDisplayName: Flotion
   flotion-mcp:
     type: tool
     platform: macOS
