@@ -91,6 +91,7 @@ import Testing
                 print(json.dumps({"id":message["id"], "error":{"code":-32000,"message":"Authentication required"}}), flush=True)
             """)
         let provider = AccountCLIProvider(.agy, executable: binary, directory: folder)
+        #expect(await provider.inspect() == AccountInspection(status: .signedOut, models: nil))
         #expect(await provider.status() == .signedOut)
         #expect(await provider.availableModels() == nil)
         var result: AIResult?
@@ -98,6 +99,51 @@ import Testing
             if case .finished(let value) = event { result = value }
         }
         #expect(result?.failure == .notSignedIn)
+    }
+
+    @Test func singlePassInspectReturnsStatusAndModelsInOneInvocation() async throws {
+        let folder = try directory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let provider = try provider(in: folder)
+        let inspection = await provider.inspect()
+        #expect(inspection == AccountInspection(
+            status: .ready(plan: nil),
+            models: [AccountModel(id: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)")]
+        ))
+        let messages = try log(in: folder)
+        #expect(messages.filter { $0["method"] as? String == "session/prompt" }.isEmpty)
+        let setups = messages.filter { $0["method"] as? String == "session/new" }
+        #expect(setups.count == 1)
+    }
+
+    @Test func inspectTimeoutAndTransientErrorsDoNotReportSignedOutOrNotInstalled() async throws {
+        let folder = try directory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let stalled = try script(in: folder, name: "agy-stalled", content: "import time\ntime.sleep(30)")
+        let stalledProvider = AccountCLIProvider(.agy, executable: stalled, directory: folder)
+        let clock = ContinuousClock()
+        let start = clock.now
+        let timedOut = await stalledProvider.inspect(timeout: .milliseconds(120))
+        let elapsed = start.duration(to: clock.now)
+        #expect(timedOut == AccountInspection(status: nil, models: nil))
+        #expect(elapsed < .seconds(5))
+
+        let transient = try script(in: folder, name: "agy-transient", content: """
+            import json, sys
+            for line in sys.stdin:
+                message = json.loads(line)
+                print(json.dumps({"id":message["id"], "error":{"code":-32603,"message":"Temporary backend error"}}), flush=True)
+            """)
+        let transientProvider = AccountCLIProvider(.agy, executable: transient, directory: folder)
+        #expect(await transientProvider.inspect() == AccountInspection(status: nil, models: nil))
+
+        let disconnected = try script(in: folder, name: "agy-disconnect", content: "import sys\nsys.exit(1)")
+        let disconnectedProvider = AccountCLIProvider(.agy, executable: disconnected, directory: folder)
+        #expect(await disconnectedProvider.inspect() == AccountInspection(status: nil, models: nil))
+
+        let missingProvider = AccountCLIProvider(.agy, executable: nil, directory: folder)
+        #expect(await missingProvider.inspect() == AccountInspection(status: .notInstalled, models: nil))
     }
 
     @Test func cancellingDiscoveryStopsTheProtocolProcess() async throws {
@@ -109,6 +155,11 @@ import Testing
         try await Task.sleep(for: .milliseconds(50))
         task.cancel()
         #expect(await task.value == nil)
+
+        let inspectTask = Task { await provider.inspect() }
+        try await Task.sleep(for: .milliseconds(50))
+        inspectTask.cancel()
+        #expect(await inspectTask.value == AccountInspection(status: nil, models: nil))
     }
 
     private func directory() throws -> URL {
@@ -117,8 +168,8 @@ import Testing
         return folder
     }
 
-    private func script(in folder: URL, content: String) throws -> URL {
-        let binary = folder.appendingPathComponent("agy-stub")
+    private func script(in folder: URL, name: String = "agy-stub", content: String) throws -> URL {
+        let binary = folder.appendingPathComponent(name)
         try ("#!/usr/bin/python3\n" + content + "\n").write(to: binary, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: binary.path)
         return binary

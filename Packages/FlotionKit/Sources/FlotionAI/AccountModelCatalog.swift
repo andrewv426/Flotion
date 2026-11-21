@@ -10,21 +10,48 @@ public struct AccountModel: Equatable, Sendable {
     }
 }
 
+/// The result of inspecting an account-authenticated CLI provider.
+/// `status == nil` means the probe timed out or failed transiently rather than reporting a definitive state.
+public struct AccountInspection: Equatable, Sendable {
+    public let status: AIProviderStatus?
+    public let models: [AccountModel]?
+
+    public init(status: AIProviderStatus?, models: [AccountModel]?) {
+        self.status = status
+        self.models = models
+    }
+}
+
 extension AccountCLIProvider {
-    /// Fetches the CLI's picker catalog using the existing sign-in, without a model turn.
-    public func availableModels() async -> [AccountModel]? {
-        guard let executable else { return nil }
+    /// Checks sign-in status and fetches the account model catalog in a single pass when supported.
+    public func inspect(timeout: Duration = .seconds(15)) async -> AccountInspection {
+        guard let executable else { return AccountInspection(status: .notInstalled, models: nil) }
         if cli == .agy {
             do {
                 try prepareDirectory()
-                return await AntigravitySession.inspect(command(executable, AntigravitySession.arguments)).models
+                return await AntigravitySession.inspect(command(executable, AntigravitySession.arguments), timeout: timeout)
             } catch {
-                return nil
+                return AccountInspection(status: nil, models: nil)
             }
+        }
+        let status = await probeStatus(timeout: timeout)
+        guard case .ready = status else {
+            return AccountInspection(status: status, models: nil)
+        }
+        let models = await availableModels(timeout: timeout)
+        return AccountInspection(status: status, models: models)
+    }
+
+    /// Fetches the CLI's picker catalog using the existing sign-in, without a model turn.
+    public func availableModels(timeout: Duration = .seconds(15)) async -> [AccountModel]? {
+        guard let executable else { return nil }
+        if cli == .agy {
+            return await inspect(timeout: timeout).models
         }
         return await withTaskGroup(of: [AccountModel]?.self) { group in
             group.addTask {
                 do {
+                    try Task.checkCancellation()
                     try prepareDirectory()
                     return try await loadCatalog(executable)
                 } catch {
@@ -32,7 +59,7 @@ extension AccountCLIProvider {
                 }
             }
             group.addTask {
-                try? await Task.sleep(for: .seconds(15))
+                try? await Task.sleep(for: timeout)
                 return nil
             }
             let result = await group.next()
@@ -82,6 +109,7 @@ private func codexCatalog(_ process: AIProcess) async -> [AccountModel]? {
     var cursors = Set<String>()
     var models: [AccountModel] = []
     for await line in lines {
+        if Task.isCancelled { return nil }
         guard let header = try? JSONDecoder().decode(CodexCatalogReplyID.self, from: line),
               header.id == requestID else { continue }
         var params: [String: Any] = ["includeHidden": false]

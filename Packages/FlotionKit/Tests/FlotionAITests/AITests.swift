@@ -189,6 +189,44 @@ private func tempDirectory() throws -> URL {
         #expect(result.failure == .notInstalled)
     }
 
+    @Test func statusProbeRespectsTimeoutAndCancellation() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        #expect(await ClaudeCLI.probeStatus(executable: nil) == .notInstalled)
+
+        let ready = dir.appendingPathComponent("claude-ready")
+        try "#!/bin/bash\necho '{\"loggedIn\":true,\"subscriptionType\":\"pro\"}'\n".write(to: ready, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ready.path)
+        #expect(await ClaudeCLI.probeStatus(executable: ready) == .ready(plan: "pro"))
+
+        let stalled = dir.appendingPathComponent("claude-stalled")
+        let pidFile = dir.appendingPathComponent("pid")
+        try "#!/bin/bash\necho $$ > '\(pidFile.path)'\nexec /bin/sleep 30\n".write(to: stalled, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stalled.path)
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        #expect(await ClaudeCLI.probeStatus(executable: stalled, timeout: .milliseconds(300)) == nil)
+        #expect(start.duration(to: clock.now) < .seconds(5))
+        // The timed-out child is terminated rather than left running.
+        let pid = try #require(Int32(String(decoding: Data(contentsOf: pidFile), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)))
+        var alive = true
+        for _ in 0..<50 where alive {
+            alive = kill(pid, 0) == 0
+            if alive { try await Task.sleep(for: .milliseconds(20)) }
+        }
+        #expect(!alive)
+
+        let cancelStart = clock.now
+        let task = Task { await ClaudeCLI.probeStatus(executable: stalled) }
+        try await Task.sleep(for: .milliseconds(50))
+        task.cancel()
+        #expect(await task.value == nil)
+        #expect(cancelStart.duration(to: clock.now) < .seconds(5))
+    }
+
     @Test func aProcessThatDiesMidReplyEndsTheStreamWithAFailure() async throws {
         let dir = try tempDirectory()
         let url = dir.appendingPathComponent("claude")
