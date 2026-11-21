@@ -252,7 +252,7 @@ public enum DiagramTemplate {
             travel: bezier(.3, .1, .25, 1), // launches briskly, settles gently into the receiver
             // A damped spring's impulse: up to the peak, a small undershoot, back to rest.
             spring: 'linear(' + Array.from({ length: 17 }, (_, k) => (Math.exp(-k / 4) * Math.sin(Math.PI * k / 8) / .4453).toFixed(3)) + ')',
-            leadIn: 180, gap: 160, travelMin: 600, travelMax: 1000, travelPerPx: 2.8,
+            leadIn: 180, travelMin: 600, travelMax: 1000, travelPerPx: 2.8,
             dot: 4.5, grow: .1, absorb: .12, absorbR: 2,
             trailWindow: 90, trailMax: 36, trailShare: .3,
             trail: [[1.5, .2, 1], [2.5, .4, .62], [3.5, .65, .3]], // width, opacity, share of the tail
@@ -428,32 +428,35 @@ public enum DiagramTemplate {
             $('next').disabled = index === S.steps.length - 1;
             if (animate && step.sends.length) {
               const tokens = activeTokens = gTokens.appendChild(el('g', {}));
-              const lastArrival = new Map(step.sends.map((send, order) => [send.to, order]));
-              const started = performance.now();
-              let delay = M.leadIn; // Let new nodes and arrow directions settle before sending.
-              step.sends.forEach((send, order) => {
+              const remaining = new Map();
+              step.sends.forEach(send => remaining.set(send.to, (remaining.get(send.to) ?? 0) + 1));
+              const startAt = performance.now() + M.leadIn; // Let new nodes and arrow directions settle before sending.
+              let maxDuration = 0;
+              step.sends.forEach(send => {
                 const edge = edges[send.edge], path = step.edges[send.edge].hi ? edge.hi : edge.lo;
                 const length = path.getTotalLength();
                 const duration = Math.min(M.travelMax, Math.max(M.travelMin, length * M.travelPerPx));
+                maxDuration = Math.max(maxDuration, duration);
                 const sender = nodeAt(path.getPointAtLength(send.forward ? 0 : length)), receiver = nodes[send.to];
-                travel(send, tokens, path, length, started + delay, duration, () => {
+                travel(send, tokens, path, length, startAt, duration, () => {
                   setLive(edge, true);
-                  // A faint ring as the sender emits, unless it is still lit from a message it just received.
+                  // A faint ring as the sender emits, guarded so fan-out emits a single ring.
                   if (pulses.get(sender.ring)?.playState !== 'running') pulse(sender.ring, M.emitOpacity, M.emit, M.emitScale);
                 }, () => {
-                  if (lastArrival.get(send.to) === order) updateNode(receiver, step.nodes[send.to], true, direction, false);
+                  const left = remaining.get(send.to) - 1;
+                  remaining.set(send.to, left);
+                  if (left === 0) updateNode(receiver, step.nodes[send.to], true, direction, false);
                   pulse(receiver.ring, M.arriveOpacity);
                   bump(receiver);
                 });
-                delay += duration + M.gap;
               });
-              transitionDuration = delay - M.gap + Math.max(M.pulse, M.bump);
+              transitionDuration = M.leadIn + maxDuration + Math.max(M.pulse, M.bump);
             }
           }
 
           // A tapering trail follows each message along the actual curve, in either direction. Its length
           // is the ground covered in the last moments, so it stretches mid-flight and vanishes on landing.
-          // Messages in one step travel in order; the arrow lights as each leaves, the receiver responds as it lands.
+          // Messages in one step travel concurrently; each arrow lights as its message leaves, and each receiver responds as messages land.
           function travel(send, tokens, path, length, startAt, duration, depart, arrive) {
             const d = path.getAttribute('d'), longest = Math.min(M.trailMax, length * M.trailShare);
             const trails = M.trail.map(([width, opacity]) => tokens.appendChild(el('path', { class: 'message-trail', d,

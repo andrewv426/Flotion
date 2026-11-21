@@ -13,26 +13,27 @@ import WebKit
 /// screen-recording permission, so it runs anywhere the app can launch.
 @MainActor
 enum SelfTest {
-    /// Runs long message chains without wall-clock waits; WebKit still supplies real SVG geometry.
+    /// Runs concurrent fan-out and fan-in without wall-clock waits; WebKit still supplies real SVG geometry.
     private static func checkFlowSequence(web: WKWebView, output: URL, check: (Bool, String) -> Void) async {
         let source = """
             flow right
-            a: Sender
+            a: Source
             b: Relay
-            c: Receiver
-            a -> b -> c
-            c -> a {style: dashed}
+            c: Worker
+            d: Join
+            a -> b -> c -> d
+            a -> d {style: dashed}
             step "Ready"
-            step "Exchange"
-              send a -> b: first
-              send b -> c: second
-              send c -> a: reply
-              send a -> b: last
-              tag a, b, c: arrived
+            step "Concurrent"
+              send a -> d: long
+              send a -> b: fanout
+              send c -> d: short
+              tag b, d: arrived
+              mark d: good
             step "Finished"
             """
         guard let scene = try? FlowScene(source: source) else {
-            check(false, "the message-chain fixture parses")
+            check(false, "the concurrent-sends fixture parses")
             return
         }
         let originalFrame = web.frame
@@ -65,6 +66,8 @@ enum SelfTest {
                   const nodes = [...document.querySelectorAll('.node')];
                   const edges = [...document.querySelectorAll('.edge')], labels = [...document.querySelectorAll('.elabel')];
                   const arrived = i => nodes[i].querySelector('.tag').textContent === 'arrived';
+                  const joinUpdated = () => arrived(3) && nodes[3].dataset.tone === 'good';
+                  const joinPending = () => nodes[3].querySelector('.tag').textContent === '' && !nodes[3].dataset.tone;
                   const running = e => e.getAnimations().some(a => a.playState === 'running');
                   const lit = k => edges[k].classList.contains('live') && labels[k].classList.contains('live');
                   const unlit = k => !edges[k].classList.contains('live') && !labels[k].classList.contains('live');
@@ -82,27 +85,31 @@ enum SelfTest {
                   };
                   const initial = matches(0);
                   window.flotion.go(1);
-                  const sends = scene.steps[1].sends, senders = [0, 1, 2, 0];
+                  // sends: 0 = a->d (long), 1 = a->b (short fan-out from a), 2 = c->d (short fan-in to d).
+                  const sends = scene.steps[1].sends, senders = [0, 0, 2];
                   const sendDots = [...document.querySelectorAll('.token')];
-                  // Arrows carrying a message wait for it; each lights the moment its message leaves.
-                  let liveOnDeparture = sendDots.length === sends.length && sends.every(s => unlit(s.edge));
+                  // Carrying edges stay unlit until departure, then light up together.
+                  let liveOnDeparture = sendDots.length === sends.length && sends.every(s => unlit(s.edge)) && unlit(1);
+                  let departedTogether = true;
                   let emits = true, responds = true, landings = 0, growsIn = true, absorbs = true, absorbing = false;
                   const departed = new Set(), landed = new Set();
                   document.getElementById('play').click();
-                  let serial = true, held = true, curve = false, lastReceiver = true, traveled = false;
+                  let maxVisible = 0, held = true, curve = false, fanInHeld = true, sawEarlyArrival = false, traveled = false;
                   let completedAt = null;
                   for (let frame = 0; frame < 400; frame++) {
                     window.flowClock.step();
                     const dots = [...document.querySelectorAll('.token')];
                     const visible = dots.filter(d => +d.getAttribute('opacity') > .5);
-                    serial &&= visible.length <= 1;
+                    maxVisible = Math.max(maxVisible, visible.length);
                     traveled ||= visible.length > 0;
                     curve ||= visible.some(d => Math.abs(+d.getAttribute('cy') - \(scene.nodes[0].y)) > 10);
                     if (window.flotion.index() === 1) {
+                      const beforeDepart = departed.size;
                       sendDots.forEach((d, j) => {
                         if (d.hasAttribute('cx') && !departed.has(j)) {
                           departed.add(j);
                           emits &&= running(nodes[senders[j]].querySelector('.ring'));
+                          if (senders[j] === 0) emits &&= nodes[0].querySelector('.ring').getAnimations().length === 1;
                           growsIn &&= +d.getAttribute('r') < 3;
                         }
                         const opacity = +d.getAttribute('opacity'), r = +d.getAttribute('r');
@@ -114,16 +121,25 @@ enum SelfTest {
                           responds &&= running(receiver.querySelector('.inner')) && running(receiver.querySelector('.ring'));
                         }
                       });
-                      liveOnDeparture &&= sends.every(s => sends.some((o, j) => o.edge === s.edge && departed.has(j)) ? lit(s.edge) : unlit(s.edge));
+                      if (beforeDepart === 0 && departed.size > 0) departedTogether &&= departed.size === sends.length;
+                      liveOnDeparture &&= unlit(1) && sends.every(s => departed.size > 0 ? lit(s.edge) : unlit(s.edge));
+                      // Fan-in to d: c->d (declared last, shorter) arrives before a->d (declared first, longer).
+                      // d must stay un-updated until a->d lands, even after c->d has already landed.
+                      if (!landed.has(0)) {
+                        fanInHeld &&= joinPending();
+                        if (landed.has(2)) sawEarlyArrival = true;
+                      } else {
+                        fanInHeld &&= joinUpdated();
+                      }
                     }
                     if (dots.length > 0) {
                       held &&= window.flotion.index() === 1;
-                      lastReceiver &&= !arrived(1);
                     } else if (completedAt === null) completedAt = frame;
                     if (completedAt !== null && frame - completedAt < 50) held &&= window.flotion.index() === 1;
                   }
-                  const finished = serial && held && curve && lastReceiver && traveled && completedAt !== null &&
-                    nodes.every((_, i) => arrived(i)) && !document.querySelector('.message-trail') && window.flotion.index() === 2;
+                  const finished = maxVisible >= 2 && held && curve && fanInHeld && sawEarlyArrival && traveled &&
+                    completedAt !== null && arrived(1) && joinUpdated() && !document.querySelector('.message-trail') &&
+                    window.flotion.index() === 2;
                   const after = matches(2);
                   // A seek the moment a message lands cancels the receiver's bump and pulse.
                   window.flotion.go(0);
@@ -131,11 +147,16 @@ enum SelfTest {
                   let landing = false;
                   for (let i = 0; i < 100 && !landing; i++) {
                     window.flowClock.step();
-                    landing = running(nodes[1].querySelector('.inner'));
+                    landing = running(nodes[1].querySelector('.inner')) && running(nodes[3].querySelector('.inner'));
                   }
+                  const arrivalAnimations = [nodes[1], nodes[3]].flatMap(n =>
+                    [...n.querySelector('.inner').getAnimations(), ...n.querySelector('.ring').getAnimations()]);
                   window.flotion.go(0);
-                  const cancelled = landing && nodes.every(n => !running(n.querySelector('.inner')) && !running(n.querySelector('.ring')));
-                  // Seeks in mid-journey settle on the target step's own state, with no arrow left unlit.
+                  const cancelled = landing && arrivalAnimations.length > 0 &&
+                    arrivalAnimations.every(a => a.playState !== 'running') &&
+                    nodes.every(n => !running(n.querySelector('.inner'))) &&
+                    !running(nodes[3].querySelector('.ring'));
+                  // Seeks in mid-journey (both before and after an early fan-in landing) settle on the target step's own state.
                   for (let i = 0; i < 250; i++) window.flowClock.step();
                   let settled = matches(0);
                   window.flotion.go(1);
@@ -145,7 +166,7 @@ enum SelfTest {
                   settled &&= matches(2);
                   window.flotion.go(0);
                   window.flotion.go(1);
-                  for (let i = 0; i < 30; i++) window.flowClock.step();
+                  for (let i = 0; i < 45; i++) window.flowClock.step();
                   window.flotion.go(0);
                   window.flotion.go(1);
                   for (let i = 0; i < 300; i++) window.flowClock.step();
@@ -154,23 +175,23 @@ enum SelfTest {
                   for (let i = 0; i < 250; i++) window.flowClock.step();
                   document.getAnimations().forEach(a => a.finish());
                   settled &&= matches(0) && window.flotion.index() === 0;
-                  return { journey: finished && initial && after, live: liveOnDeparture && departed.size === sends.length,
+                  return { journey: finished && initial && after, live: liveOnDeparture && departedTogether && departed.size === sends.length,
                            respond: emits && responds && landings === sends.length && growsIn && absorbs && absorbing,
                            cancelled, settled };
                 })()
                 """) as? [String: Bool]
             let label = reduced ? " (with macOS Reduce Motion enabled)" : ""
-            check(result?["journey"] == true, "ordered curved journeys commit on arrival and finish before autoplay advances" + label)
-            check(result?["live"] == true, "an arrow carrying a message stays unlit until the message departs, then lights" + label)
-            check(result?["respond"] == true, "a message grows out of a pulsing sender and shrinks into a receiver that bumps and pulses" + label)
+            check(result?["journey"] == true, "concurrent fan-out and fan-in commit on the last arrival and finish before autoplay advances" + label)
+            check(result?["live"] == true, "all carrying arrows stay unlit until departure, then light up together" + label)
+            check(result?["respond"] == true, "concurrent messages grow out of pulsing senders and shrink into receivers that bump and pulse" + label)
             check(result?["cancelled"] == true, "a seek cancels the receiver's bump and pulse" + label)
             check(result?["settled"] == true, "seeks mid-journey settle every node and arrow on the target step's state" + label)
             if !reduced {
                 for (name, script) in [
                     ("06b-flow-before", "window.flotion.go(0)"),
-                    // The reply a third of the way round the long dashed loop, where its tail is at full length.
-                    ("06c-flow-travel", "window.flotion.go(1); const reply = document.querySelectorAll('.edge')[2];" +
-                        "for (let i = 0; i < 400 && !reply.classList.contains('live'); i++) window.flowClock.step();" +
+                    // All three concurrent messages mid-flight, with the long dashed curve a third of the way round.
+                    ("06c-flow-travel", "window.flotion.go(1); const longEdge = document.querySelectorAll('.edge')[3];" +
+                        "for (let i = 0; i < 400 && !longEdge.classList.contains('live'); i++) window.flowClock.step();" +
                         "for (let i = 0; i < 18; i++) window.flowClock.step()")
                 ] {
                     // The page's own background, so the picture reads the same on any backdrop.
