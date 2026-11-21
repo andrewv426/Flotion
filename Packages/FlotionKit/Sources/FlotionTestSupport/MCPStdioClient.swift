@@ -10,6 +10,8 @@ public final class MCPStdioClient: @unchecked Sendable {
     private let process = Process()
     private let input = Pipe()
     private let output = Pipe()
+    private let readLock = NSLock()
+    private var outputClosed = false
     private let condition = NSCondition()
     private var buffer = Data()
     private var responses: [Int: [String: Any]] = [:]
@@ -28,21 +30,52 @@ public final class MCPStdioClient: @unchecked Sendable {
         process.standardInput = input
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            self?.ingest(handle.availableData)
-        }
+        _ = fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
         try process.run()
+        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            guard let self else {
+                handle.readabilityHandler = nil
+                return
+            }
+            self.handleReadable(handle)
+        }
     }
 
     deinit { terminate() }
 
     public func terminate() {
         output.fileHandleForReading.readabilityHandler = nil
+        closeOutput()
+        try? input.fileHandleForWriting.close()
         if process.isRunning { process.terminate() }
     }
 
+    private func handleReadable(_ handle: FileHandle) {
+        readLock.lock()
+        if outputClosed {
+            readLock.unlock()
+            handle.readabilityHandler = nil
+            return
+        }
+        let data = handle.availableData
+        readLock.unlock()
+        if data.isEmpty {
+            handle.readabilityHandler = nil
+            closeOutput()
+            return
+        }
+        ingest(data)
+    }
+
+    private func closeOutput() {
+        readLock.lock()
+        defer { readLock.unlock() }
+        guard !outputClosed else { return }
+        outputClosed = true
+        try? output.fileHandleForReading.close()
+    }
+
     private func ingest(_ data: Data) {
-        guard !data.isEmpty else { return }
         condition.lock()
         buffer.append(data)
         while let newline = buffer.firstIndex(of: 0x0A) {
