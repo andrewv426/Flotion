@@ -1,6 +1,6 @@
 import Foundation
 
-enum AssistantService: String, CaseIterable, Codable, Identifiable {
+enum AssistantService: String, CaseIterable, Codable, Identifiable, Sendable {
     case claude, openAI, antigravity
 
     var id: String { rawValue }
@@ -38,7 +38,7 @@ enum AssistantService: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-struct AssistantModel: Codable, Equatable, Identifiable {
+struct AssistantModel: Codable, Equatable, Identifiable, Sendable {
     let service: AssistantService
     let alias: String
     let name: String
