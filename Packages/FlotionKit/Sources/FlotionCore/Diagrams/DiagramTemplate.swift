@@ -194,7 +194,7 @@ public enum DiagramTemplate {
         .head { fill: var(--fl-line); stroke: var(--fl-line); stroke-width: 1; stroke-linejoin: round;
                 transition: fill .25s ease, stroke .25s ease; }
         .direction { opacity: 0; transition: opacity .26s var(--motion-ease); }
-        .edge.at-hi .direction.hi, .edge.at-lo .direction.lo { opacity: 1; }
+        .edge.at-hi .direction.hi, .edge.at-lo .direction.lo, .edge.at-both .direction.both, .edge.at-none .direction.none { opacity: 1; }
         .edge.live .line { stroke: var(--fl-accent); stroke-width: 1.6; }
         .edge.live .head { fill: var(--fl-accent); stroke: var(--fl-accent); }
         .elabel { fill: var(--fl-muted); font-size: 12.5px; font-weight: 500; paint-order: stroke; stroke: var(--fl-bg);
@@ -275,14 +275,16 @@ public enum DiagramTemplate {
           });
           const edges = S.edges.map(d => {
             const e = gEdges.appendChild(el('g', { class: 'edge ' + (d.solid ? 'solid' : 'dashed') }));
-            const direction = (side, linePath, headPath) => {
+            const direction = (side, linePath, headPaths) => {
               const group = e.appendChild(el('g', { class: 'direction ' + side }));
               const line = group.appendChild(el('path', { class: 'line', d: linePath }));
               if (d.solid) line.setAttribute('pathLength', 1);
-              group.appendChild(el('path', { class: 'head', d: headPath }));
+              for (const headPath of headPaths) group.appendChild(el('path', { class: 'head', d: headPath }));
               return line;
             };
-            const hi = direction('hi', d.lineHi, d.headHi), lo = direction('lo', d.lineLo, d.headLo);
+            const hi = direction('hi', d.lineHi, [d.headHi]), lo = direction('lo', d.lineLo, [d.headLo]);
+            direction('both', d.lineBoth, [d.headHi, d.headLo]);
+            direction('none', d.lineNone, []);
             const label = gLabels.appendChild(el('text', { class: 'elabel' + (d.inGroup ? ' in-group' : ''), x: d.lx, y: d.ly, dy: '.35em', 'text-anchor': d.anchor }));
             return { e, hi, lo, label };
           });
@@ -415,8 +417,10 @@ public enum DiagramTemplate {
               const e = edges[k];
               e.e.classList.toggle('off', !s.on);
               e.e.classList.toggle('dim', s.dim);
-              e.e.classList.toggle('at-hi', s.hi);
-              e.e.classList.toggle('at-lo', !s.hi);
+              e.e.classList.toggle('at-hi', s.heads === 'hi');
+              e.e.classList.toggle('at-lo', s.heads === 'lo');
+              e.e.classList.toggle('at-both', s.heads === 'both');
+              e.e.classList.toggle('at-none', s.heads === 'none');
               e.label.classList.toggle('off', !s.on);
               e.label.classList.toggle('dim', s.dim);
               // An arrow carrying a message lights up as the message leaves, not before.
@@ -432,7 +436,7 @@ public enum DiagramTemplate {
               const started = performance.now();
               let delay = M.leadIn; // Let new nodes and arrow directions settle before sending.
               step.sends.forEach((send, order) => {
-                const edge = edges[send.edge], path = step.edges[send.edge].hi ? edge.hi : edge.lo;
+                const edge = edges[send.edge], path = step.edges[send.edge].heads === 'hi' ? edge.hi : edge.lo;
                 const length = path.getTotalLength();
                 const duration = Math.min(M.travelMax, Math.max(M.travelMin, length * M.travelPerPx));
                 const sender = nodeAt(path.getPointAtLength(send.forward ? 0 : length)), receiver = nodes[send.to];

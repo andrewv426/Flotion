@@ -34,15 +34,57 @@ public struct FlowNode: Sendable, Equatable {
     public var tags: [String] = []
 }
 
+public enum FlowEdgeKind: String, Sendable, Equatable, CaseIterable { case forward, backward, bidirectional, undirected }
+
+public enum FlowEdgeHeads: String, Sendable, Equatable, Codable { case to, from, both, none }
+
+extension FlowEdgeKind {
+    var restingHeads: FlowEdgeHeads {
+        switch self {
+        case .forward: .to
+        case .backward: .from
+        case .bidirectional: .both
+        case .undirected: .none
+        }
+    }
+
+    var operatorSymbol: String {
+        switch self {
+        case .forward: "->"
+        case .backward: "<-"
+        case .bidirectional: "<->"
+        case .undirected: "--"
+        }
+    }
+
+    var isSymmetric: Bool { self == .bidirectional || self == .undirected }
+}
+
 public struct FlowEdge: Sendable, Equatable {
     public var from: String
     public var to: String
+    public var kind: FlowEdgeKind = .forward
     public var label: String
     public var dashed: Bool
     public var enter: Int
     public var line: Int
     /// The declared label plus every label a `send` puts on this edge.
     public var labels: [String]
+}
+
+extension FlowEdge {
+    func connects(_ a: String, _ b: String) -> Bool {
+        (from == a && to == b) || (from == b && to == a)
+    }
+
+    /// Whether this is a directed edge (`->` or `<-`) whose effective direction is `src -> dst`.
+    func points(from src: String, to dst: String) -> Bool {
+        switch kind {
+        case .forward: from == src && to == dst
+        case .backward: to == src && from == dst
+        case .bidirectional, .undirected: false
+        }
+    }
 }
 
 public struct FlowGroup: Sendable, Equatable {
@@ -74,7 +116,7 @@ public enum FlowOp: Sendable, Equatable {
     case tag([FlowTarget], String)
     /// `nil` clears the tone.
     case mark([FlowTarget], FlowTone?)
-    /// `against` is true when the message travels against the edge's declared direction.
+    /// `against` is true when the message travels from `edge.to` to `edge.from`.
     case send(edge: Int, against: Bool, label: String?, to: String)
 }
 
@@ -101,8 +143,8 @@ public struct FlowState: Sendable, Equatable {
         /// A message is travelling this edge in this step.
         public var live: Bool
         public var label: String
-        /// False while a message travels against the declared direction: the head moves to the other end.
-        public var headAtTo: Bool
+        /// Arrowhead placement for this step: resting heads by edge kind, or temporarily pointing with an active `send`.
+        public var heads: FlowEdgeHeads
     }
     public struct Group: Sendable, Equatable {
         public var visible: Bool
@@ -169,8 +211,9 @@ public extension FlowDiagram {
                 let send = sends.last { $0.edge == index }
                 let shown = edge.enter <= i && !hiddenEdges.contains(index) && visible[edge.from] == true && visible[edge.to] == true
                 let focused = focus.map { $0.contains(edge.from) && $0.contains(edge.to) } ?? true
+                let heads: FlowEdgeHeads = if let send { send.against ? .from : .to } else { edge.kind.restingHeads }
                 return FlowState.Edge(visible: shown, dim: send == nil && !focused, live: send != nil,
-                                      label: send?.label ?? edge.label, headAtTo: !(send?.against ?? false))
+                                      label: send?.label ?? edge.label, heads: heads)
             }
             let groupStates = groups.map { group in
                 FlowState.Group(visible: group.members.contains { visible[$0] == true },

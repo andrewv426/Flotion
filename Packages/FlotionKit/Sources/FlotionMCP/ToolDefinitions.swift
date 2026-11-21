@@ -26,7 +26,7 @@ private let diagramGuide = """
 
     flow right | down                          direction (default right)
     id: Label {shape: box|pill|circle|diamond|database}
-    a -> b: label {style: dashed}              an arrow; label and style are optional
+    a -> b: label {style: dashed}              an edge (`->`, `<-`, `<->`, or `--`); label and style are optional
     group id "Title" {                         a shaded region around the nodes declared inside it
       ...nodes...
     }
@@ -40,11 +40,13 @@ private let diagramGuide = """
       show a, b
       x: New node                              a node or edge declared in a step appears at that step
 
-    Rules: ids use letters, digits, _ and -. Declare a node before using it. `send` needs a declared edge between \
-    the two nodes (either direction) and may go against it, as a reply does. `send` and `focus` last for their step \
-    only; tag, mark, set, hide and show carry on until changed. `# ` starts a comment. A diagram without steps is a \
-    still picture. Keep labels to a few words and put the explanation in step captions; 3 to 8 nodes and 3 to 6 \
-    steps reads best.
+    Rules: ids use letters, digits, _ and -. Declare a node before using it. Edges support `->` (forward), `<-` \
+    (backward, keeping the left node earlier in layout), `<->` (bidirectional) and `--` (undirected), and can be \
+    chained (`a -> b <- c`). `show` and `hide` accept any of the four edge operators. `send` always uses `->` over \
+    any declared edge between the two nodes, temporarily pointing the arrowhead in the message direction for that \
+    step. `send` and `focus` last for their step only; tag, mark, set, hide and show carry on until changed. `# ` \
+    starts a comment. A diagram without steps is a still picture. Keep labels to a few words and put the explanation \
+    in step captions; 3 to 8 nodes and 3 to 6 steps reads best.
 
     Example:
     flow right

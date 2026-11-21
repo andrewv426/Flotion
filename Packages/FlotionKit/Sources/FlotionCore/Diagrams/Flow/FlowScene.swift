@@ -13,9 +13,11 @@ public struct FlowScene: Codable, Sendable, Equatable {
         public var sink: Double
     }
     public struct Edge: Codable, Sendable, Equatable {
-        /// The line when the head is at the far end of the flow, and when it is at the near end.
+        /// The line trimmed for each arrowhead placement: far end, near end, both ends, or neither.
         public var lineHi: String
         public var lineLo: String
+        public var lineBoth: String
+        public var lineNone: String
         public var headHi: String
         public var headLo: String
         public var lx: Double
@@ -44,8 +46,8 @@ public struct FlowScene: Codable, Sendable, Equatable {
         public var dim: Bool
         public var live: Bool
         public var label: String
-        /// The head is at the far end of the flow.
-        public var hi: Bool
+        /// Arrowhead placement along the laid-out path: `"hi"`, `"lo"`, `"both"`, or `"none"`.
+        public var heads: String
     }
     public struct GroupState: Codable, Sendable, Equatable {
         public var on: Bool
@@ -107,7 +109,10 @@ public struct FlowScene: Codable, Sendable, Equatable {
                  sink: node.shape == .database ? FlowMetrics.databaseRy / 2 : 0)
         }
         edges = zip(diagram.edges, layout.edges).map { edge, path in
-            Edge(lineHi: Self.line(path.points, horizontal: H, headAtEnd: true), lineLo: Self.line(path.points, horizontal: H, headAtEnd: false),
+            Edge(lineHi: Self.line(path.points, horizontal: H, trimStart: false, trimEnd: true),
+                 lineLo: Self.line(path.points, horizontal: H, trimStart: true, trimEnd: false),
+                 lineBoth: Self.line(path.points, horizontal: H, trimStart: true, trimEnd: true),
+                 lineNone: Self.line(path.points, horizontal: H, trimStart: false, trimEnd: false),
                  headHi: Self.head(path.points, horizontal: H, atEnd: true), headLo: Self.head(path.points, horizontal: H, atEnd: false),
                  lx: path.label.x, ly: path.label.y, anchor: path.labelStartsAtPoint ? "start" : "middle",
                  solid: !edge.dashed, inGroup: path.insideGroup)
@@ -120,9 +125,21 @@ public struct FlowScene: Codable, Sendable, Equatable {
             Step(title: i < diagram.steps.count ? diagram.steps[i].title : "",
                  caption: i < diagram.steps.count ? diagram.steps[i].caption : "",
                  nodes: state.nodes.map { NodeState(on: $0.visible, dim: $0.dim, label: $0.label, tag: $0.tag, tone: $0.tone?.rawValue) },
-                 edges: zip(state.edges, layout.edges).map { EdgeState(on: $0.visible, dim: $0.dim, live: $0.live, label: $0.label, hi: $0.headAtTo != $1.flipped) },
+                 edges: zip(state.edges, layout.edges).map {
+                     EdgeState(on: $0.visible, dim: $0.dim, live: $0.live, label: $0.label,
+                               heads: Self.resolvedHeads($0.heads, flipped: $1.flipped))
+                 },
                  groups: state.groups.map { GroupState(on: $0.visible, dim: $0.dim) },
                  sends: state.sends.map { Send(edge: $0.edge, forward: $0.against == layout.edges[$0.edge].flipped, to: index[$0.to] ?? 0) })
+        }
+    }
+
+    private static func resolvedHeads(_ heads: FlowEdgeHeads, flipped: Bool) -> String {
+        switch heads {
+        case .to: flipped ? "lo" : "hi"
+        case .from: flipped ? "hi" : "lo"
+        case .both: "both"
+        case .none: "none"
         }
     }
 
@@ -135,13 +152,14 @@ public struct FlowScene: Codable, Sendable, Equatable {
         return r == r.rounded() ? String(Int(r)) : String(r)
     }
 
-    /// The edge as a run of smooth curves through its waypoints. The end that carries the arrowhead stops short of it.
-    static func line(_ points: [FlowPoint], horizontal: Bool, headAtEnd: Bool) -> String {
+    /// The edge as a run of smooth curves through its waypoints. Each end carrying an arrowhead stops short of it.
+    static func line(_ points: [FlowPoint], horizontal: Bool, trimStart: Bool, trimEnd: Bool) -> String {
         var p = points
         let cut = FlowMetrics.tipGap + FlowMetrics.headLength - 1.5
-        if headAtEnd {
+        if trimEnd {
             if horizontal { p[p.count - 1].x -= cut } else { p[p.count - 1].y -= cut }
-        } else {
+        }
+        if trimStart {
             if horizontal { p[0].x += cut } else { p[0].y += cut }
         }
         var d = "M\(n(p[0].x)),\(n(p[0].y))"
