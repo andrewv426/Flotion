@@ -154,6 +154,183 @@ private let growth = """
         #expect(FlowIssue.report(issues).hasPrefix("The diagram source has 3 problems."))
         #expect(FlowIssue.report(issues).contains("line 2: unknown node `b`"))
     }
+
+    @Test func parsesAllFourEdgeOperatorsAndMixedChains() {
+        let (d, issues) = FlowParser.parse("""
+            a: A
+            b: B
+            c: C
+            client: Client
+            api: API
+            db: DB
+            n1: N1
+            n2: N2
+            n3: N3
+            web-app: Web
+            api-gw: Gateway
+
+            a -> b <- c: synced {style: dashed}
+            client <-> api -> db: rpc {style: solid}
+            n1 -- n2 -- n3: link
+            web-app<->api-gw
+            """)
+        #expect(issues.isEmpty, "\(issues)")
+        #expect(d.edges.map { "\($0.from) \($0.kind.rawValue) \($0.to)" } == [
+            "a forward b",
+            "b backward c",
+            "client bidirectional api",
+            "api forward db",
+            "n1 undirected n2",
+            "n2 undirected n3",
+            "web-app bidirectional api-gw",
+        ])
+        #expect(d.edges[0].label == "synced" && d.edges[0].dashed)
+        #expect(d.edges[1].label == "synced" && d.edges[1].dashed)
+        #expect(d.edges[2].label == "rpc" && !d.edges[2].dashed)
+        #expect(d.edges[3].label == "rpc" && !d.edges[3].dashed)
+        #expect(d.edges[4].label == "link" && d.edges[5].label == "link")
+        #expect(d.edges[6].label.isEmpty && !d.edges[6].dashed)
+    }
+
+    @Test func showAndHideMatchAllFourEdgeOperators() {
+        let (d, issues) = FlowParser.parse("""
+            a: A
+            b: B
+            c: C
+            d: D
+            a -> b
+            a <- b
+            b <-> c
+            c -- d
+            step "Hide"
+              hide a -> b, a <- b, c <-> b, d -- c
+            step "Show"
+              show b <- a, b -> a, b <-> c, c -- d
+            """)
+        #expect(issues.isEmpty, "\(issues)")
+        #expect(d.steps[0].ops == [.hide([.edge(0), .edge(1), .edge(2), .edge(3)])])
+        #expect(d.steps[1].ops == [.show([.edge(0), .edge(1), .edge(2), .edge(3)])])
+
+        // `a <- b` also matches an edge originally declared as `b -> a`.
+        let (rev, revIssues) = FlowParser.parse("""
+            a: A
+            b: B
+            b -> a
+            step "Hide"
+              hide a <- b
+            """)
+        #expect(revIssues.isEmpty, "\(revIssues)")
+        #expect(rev.steps[0].ops == [.hide([.edge(0)])])
+
+        // Mismatched direction/operator or edges passed to node-only verbs fail.
+        let bad = FlowParser.parse("""
+            a: A
+            b: B
+            a -> b
+            step "Bad"
+              hide a <- b
+              hide a -- b
+              focus a <-> b
+            """).issues
+        #expect(bad.map(\.line) == [5, 6, 7], "\(bad)")
+        #expect(bad[2].message.contains("not edges"))
+    }
+
+    @Test func sendResolvesNaturalThenSymmetricThenOppositeEdge() {
+        // Both a -> b and a <- b: each send picks its natural direction.
+        let (parallel, pIssues) = FlowParser.parse("""
+            a: A
+            b: B
+            a -> b
+            a <- b
+            step "Both ways"
+              send a -> b: req
+              send b -> a: res
+            """)
+        #expect(pIssues.isEmpty, "\(pIssues)")
+        #expect(parallel.steps[0].ops == [
+            .send(edge: 0, against: false, label: "req", to: "b"),
+            .send(edge: 1, against: true, label: "res", to: "a"),
+        ])
+
+        // Forward + bidirectional: forward matches natural a -> b; b -> a prefers <-> over opposite a -> b.
+        let (mixed, mIssues) = FlowParser.parse("""
+            a: A
+            b: B
+            a -> b
+            a <-> b
+            step "Preference"
+              send a -> b: forward
+              send b -> a: via-bi
+            """)
+        #expect(mIssues.isEmpty, "\(mIssues)")
+        #expect(mixed.steps[0].ops == [
+            .send(edge: 0, against: false, label: "forward", to: "b"),
+            .send(edge: 1, against: true, label: "via-bi", to: "a"),
+        ])
+
+        // Single backward, bidirectional, and undirected edges all support sends in both directions.
+        let (kinds, kIssues) = FlowParser.parse("""
+            a: A
+            b: B
+            c: C
+            d: D
+            a <- b
+            b <-> c
+            c -- d
+            step "Sends"
+              send b -> a: natural-bwd
+              send a -> b: opposite-bwd
+              send c -> b: reverse-bi
+              send c -> d: forward-link
+              send d -> c: reverse-link
+            """)
+        #expect(kIssues.isEmpty, "\(kIssues)")
+        #expect(kinds.steps[0].ops == [
+            .send(edge: 0, against: true, label: "natural-bwd", to: "a"),
+            .send(edge: 0, against: false, label: "opposite-bwd", to: "b"),
+            .send(edge: 1, against: true, label: "reverse-bi", to: "b"),
+            .send(edge: 2, against: false, label: "forward-link", to: "d"),
+            .send(edge: 2, against: true, label: "reverse-link", to: "c"),
+        ])
+    }
+
+    @Test(arguments: [
+        ("a: A\nb: B\na --> b", 3, "Edges are written `a -> b: label`"),
+        ("a: A\nb: B\na-->b", 3, "Edges are written `a -> b: label`"),
+        ("a: A\nb: B\na ==> b", 3, "Edges are written `a -> b: label`"),
+        ("a: A\nb: B\na -.-> b", 3, "Edges are written `a -> b: label`"),
+        ("a: A\nb: B\na <-- b", 3, "Edges are written `a -> b: label`"),
+        ("a: A\nb: B\na <--> b", 3, "Edges are written `a -> b: label`"),
+        ("a: A\nb: B\na --- b", 3, "Edges are written `a -> b: label`"),
+        ("a: A\na <- a", 2, "`a` cannot point at itself"),
+        ("a: A\na <-> a", 2, "`a` cannot point at itself"),
+        ("a: A\na -- a", 2, "`a` cannot point at itself"),
+        ("a: A\nb: B\na <-> b\nb <-> a", 4, "already declared"),
+        ("a: A\nb: B\na -- b\nb -- a", 4, "already declared"),
+        ("a: A\nb: B\na <-> b\na -- b", 4, "already declared"),
+        ("a: A\nb: B\nb -> a\na <- b", 4, "already declared"),
+        ("a: A\nb: B\na <- b\nb -> a", 4, "already declared"),
+        ("a: A\nb: B\na <- b\na <- b", 4, "already declared"),
+        ("a: A\nb: B\na -> b\nb <- a", 4, "already declared"),
+        ("a: A\nb: B\na <-> b\nstep \"S\"\n  send a <-> b: nope", 5, "write `send a -> b: label`"),
+        ("a: A\nb: B\na <- b\nstep \"S\"\n  send a <- b: nope", 5, "write `send a -> b: label`"),
+        ("a: A\nb: B\na -- b\nstep \"S\"\n  send a -- b: nope", 5, "write `send a -> b: label`"),
+    ] as [(String, Int, String)])
+    func rejectsInvalidEdgeArrowsSelfLoopsAndDuplicates(source: String, line: Int, message: String) {
+        let issues = FlowParser.parse(source).issues
+        #expect(issues.contains { $0.line == line && $0.message.contains(message) }, "\(issues)")
+    }
+
+    @Test func allowsOppositeDirectedEdgePairs() {
+        let pair1 = FlowParser.parse("a: A\nb: B\na -> b\na <- b")
+        #expect(pair1.issues.isEmpty, "\(pair1.issues)")
+        #expect(pair1.diagram.edges.count == 2)
+
+        let pair2 = FlowParser.parse("a: A\nb: B\na -> b\nb -> a")
+        #expect(pair2.issues.isEmpty, "\(pair2.issues)")
+        #expect(pair2.diagram.edges.count == 2)
+    }
 }
 
 @Suite struct FlowStateTests {
@@ -165,7 +342,7 @@ private let growth = """
         #expect(states[1].nodes.map(\.tag) == ["SYN sent", "SYN received"], "a tag stays until it is changed")
         #expect(states[2].nodes.map(\.tone) == [.good, .good])
         #expect(states.map { $0.edges[0].live } == [true, true, true])
-        #expect(states.map { $0.edges[0].headAtTo } == [true, false, true], "the head follows the message")
+        #expect(states.map { $0.edges[0].heads } == [.to, .from, .to], "the head follows the message")
         #expect(states.map { $0.edges[0].label } == ["SYN", "SYN-ACK", "ACK"])
     }
 
@@ -188,6 +365,51 @@ private let growth = """
         let states = FlowParser.parse(pipeline).diagram.states()
         #expect(states.count == 1)
         #expect(states[0].nodes.allSatisfy(\.visible) && states[0].sends.isEmpty)
+    }
+
+    @Test func edgeHeadsRestByKindOverrideOnSendAndRevert() {
+        let (diagram, issues) = FlowParser.parse("""
+            a: A
+            b: B
+            c: C
+            d: D
+            e: E
+            a -> b <- c <-> d -- e
+            step "Rest"
+            step "Send"
+              send b -> a: back-on-fwd
+              send b -> c: fwd-on-bwd
+              send d -> c: back-on-bi
+              send d -> e: fwd-on-link
+            step "Revert"
+            """)
+        #expect(issues.isEmpty, "\(issues)")
+        let states = diagram.states()
+        #expect(states.count == 3)
+        #expect(states[0].edges.map(\.heads) == [.to, .from, .both, .none])
+        #expect(states[1].edges.map(\.heads) == [.from, .to, .from, .to])
+        #expect(states[2].edges.map(\.heads) == [.to, .from, .both, .none])
+    }
+
+    @Test func showAndHideToggleMatchingEdges() {
+        let (diagram, issues) = FlowParser.parse("""
+            a: A
+            b: B
+            c: C
+            a -> b
+            a <- b
+            b <-> c
+            step "Initial"
+            step "Hide"
+              hide a <- b, c <-> b
+            step "Show"
+              show b -> a, b <-> c
+            """)
+        #expect(issues.isEmpty, "\(issues)")
+        let states = diagram.states()
+        #expect(states[0].edges.map(\.visible) == [true, true, true])
+        #expect(states[1].edges.map(\.visible) == [true, false, false])
+        #expect(states[2].edges.map(\.visible) == [true, true, true])
     }
 }
 
@@ -267,6 +489,25 @@ private let growth = """
         #expect(l.nodes[1].w >= wide + 36)
         #expect(l.edges[0].labelWidth >= FlowText.width("SYN-ACK", size: 12.5, medium: true))
     }
+
+    @Test func backwardEdgeKeepsLeftNodeEarlierInLayout() {
+        let (_, right) = layout("flow right\na: Left\nb: Right\na <- b")
+        #expect(right.nodes[0].x < right.nodes[1].x)
+        #expect(!right.edges[0].flipped)
+
+        let (_, down) = layout("flow down\na: Top\nb: Bottom\na <- b")
+        #expect(down.nodes[0].y < down.nodes[1].y)
+        #expect(!down.edges[0].flipped)
+    }
+
+    @Test func parallelForwardAndBackwardEdgesSeparatePorts() {
+        let (_, l) = layout("flow right\na: Client\nb: Server\na -> b: req\na <- b: res")
+        #expect(l.nodes[0].x < l.nodes[1].x)
+        #expect(l.edges.count == 2)
+        #expect(!l.edges[0].flipped && !l.edges[1].flipped)
+        #expect(l.edges[0].points.first!.y != l.edges[1].points.first!.y, "parallel edges fan out to distinct ports")
+        #expect(l.edges[0].points.last!.y != l.edges[1].points.last!.y)
+    }
 }
 
 @Suite struct FlowSceneTests {
@@ -274,7 +515,7 @@ private let growth = """
         let scene = try FlowScene(source: handshake)
         #expect(scene.stepped && scene.steps.count == 3)
         #expect(scene.steps.map(\.title) == ["SYN", "SYN-ACK", "ACK"])
-        #expect(scene.steps.map { $0.edges[0].hi } == [true, false, true])
+        #expect(scene.steps.map { $0.edges[0].heads } == ["hi", "lo", "hi"])
         #expect(scene.steps.map { $0.sends.map(\.forward) } == [[true], [false], [true]])
         #expect(scene.steps[1].sends[0].to == 0, "the reply lands on the client")
         #expect(scene.steps[2].nodes.map(\.tone) == ["good", "good"])
@@ -287,7 +528,7 @@ private let growth = """
     @Test func aLoopEdgePutsItsHeadAtTheNearEnd() throws {
         let scene = try FlowScene(source: pipeline)
         #expect(!scene.stepped && scene.steps.count == 1)
-        #expect(scene.steps[0].edges.map(\.hi) == [true, true, true, true, true, false])
+        #expect(scene.steps[0].edges.map(\.heads) == ["hi", "hi", "hi", "hi", "hi", "lo"])
         #expect(scene.edges.map(\.solid) == [true, true, true, true, true, false])
     }
 
@@ -308,5 +549,47 @@ private let growth = """
 
     @Test func numbersAreShortAndExact() {
         #expect(FlowScene.n(12) == "12" && FlowScene.n(-0.04) == "0" && FlowScene.n(3.25) == "3.3" && FlowScene.n(-7.5) == "-7.5")
+    }
+
+    @Test func resolvesAllFourEdgeTypesLineVariantsAndFlippedHeads() throws {
+        let source = """
+            flow right
+            a: A
+            b: B
+            c: C
+            d: D
+            e: E
+            a -> b <- c <-> d -- e
+            e <- a
+            step "Rest"
+            step "Send"
+              send a -> b: fwd
+              send b -> c: bwd
+              send c -> d: bi
+              send e -> d: link
+              send a -> e: loop
+            step "Revert"
+            """
+        let scene = try FlowScene(source: source)
+        // Edge 4 (`e <- a`) closes the cycle from e back to a, so FlowLayout flips it: `.from` (at e) becomes `"hi"`.
+        #expect(scene.steps[0].edges.map(\.heads) == ["hi", "lo", "both", "none", "hi"])
+        #expect(scene.steps[1].edges.map(\.heads) == ["hi", "hi", "hi", "lo", "hi"])
+        #expect(scene.steps[1].sends.map(\.forward) == [true, true, true, false, true])
+        #expect(scene.steps[2].edges.map(\.heads) == ["hi", "lo", "both", "none", "hi"])
+
+        // Each edge carries four distinct line path variants (hi, lo, both, none).
+        let edge = scene.edges[0]
+        #expect(Set([edge.lineHi, edge.lineLo, edge.lineBoth, edge.lineNone]).count == 4)
+        let startOf: (String) -> Substring = { $0.split(separator: "C")[0] }
+        let endOf: (String) -> Substring = { $0.split(separator: " ").last! }
+        #expect(startOf(edge.lineHi) == startOf(edge.lineNone), "lineHi is untrimmed at start")
+        #expect(endOf(edge.lineLo) == endOf(edge.lineNone), "lineLo is untrimmed at end")
+        #expect(startOf(edge.lineBoth) == startOf(edge.lineLo), "lineBoth trims start like lineLo")
+        #expect(endOf(edge.lineBoth) == endOf(edge.lineHi), "lineBoth trims end like lineHi")
+
+        // Codable round-trip preserves lineBoth, lineNone, and heads.
+        let encoded = try JSONEncoder().encode(scene)
+        let decoded = try JSONDecoder().decode(FlowScene.self, from: encoded)
+        #expect(decoded == scene)
     }
 }

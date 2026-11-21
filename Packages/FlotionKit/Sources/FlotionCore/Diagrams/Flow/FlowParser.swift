@@ -4,7 +4,7 @@ import Foundation
 ///
 ///     flow right | down
 ///     id: Label {shape: box | pill | circle | diamond | database}
-///     a -> b: label {style: dashed}
+///     a -> b: label {style: dashed}   # also <-, <->, -- and mixed chains
 ///     group id "Title" {  ...nodes...  }
 ///     step "Title": caption
 ///       send a -> b: label    focus a, b    tag a: status    mark a: good
@@ -168,11 +168,11 @@ private struct Reader {
         if parts.isEmpty { fail(line, "name at least one node") }
         var out: [FlowTarget] = []
         for part in parts {
-            if let pair = Self.pair(part) {
+            if let ref = Self.edgeRef(part) {
                 guard allowEdges else { fail(line, "this takes nodes or groups, not edges"); continue }
-                guard knownNode(pair.0, line) != nil, knownNode(pair.1, line) != nil else { continue }
-                if let found = edge(from: pair.0, to: pair.1) { out.append(.edge(found.index)) }
-                else { fail(line, "no edge between `\(pair.0)` and `\(pair.1)`") }
+                guard knownNode(ref.from, line) != nil, knownNode(ref.to, line) != nil else { continue }
+                if let index = edge(matching: ref.from, kind: ref.kind, to: ref.to) { out.append(.edge(index)) }
+                else { fail(line, "no edge `\(ref.from) \(ref.kind.operatorSymbol) \(ref.to)`") }
             } else if nodeAt[part] != nil {
                 out.append(.node(part))
             } else if groupAt[part] != nil {
@@ -201,10 +201,36 @@ private struct Reader {
         return nil
     }
 
-    private func edge(from: String, to: String) -> (index: Int, against: Bool)? {
-        if let index = diagram.edges.firstIndex(where: { $0.from == from && $0.to == to }) { return (index, false) }
-        if let index = diagram.edges.firstIndex(where: { $0.from == to && $0.to == from }) { return (index, true) }
+    private func edge(from x: String, to y: String) -> (index: Int, against: Bool)? {
+        // Prefer an edge whose natural direction is x -> y.
+        if let index = diagram.edges.firstIndex(where: { $0.points(from: x, to: y) }) {
+            return (index, diagram.edges[index].from != x)
+        }
+        // Then a symmetric (<-> or --) edge connecting x and y.
+        if let index = diagram.edges.firstIndex(where: { $0.kind.isSymmetric && $0.connects(x, y) }) {
+            return (index, diagram.edges[index].from != x)
+        }
+        // Finally, an opposite-direction edge connecting x and y.
+        if let index = diagram.edges.firstIndex(where: { $0.connects(x, y) }) {
+            return (index, diagram.edges[index].from != x)
+        }
         return nil
+    }
+
+    private func edge(matching a: String, kind: FlowEdgeKind, to b: String) -> Int? {
+        if kind.isSymmetric {
+            return diagram.edges.firstIndex { $0.kind == kind && $0.connects(a, b) }
+        }
+        let (src, dst) = kind == .forward ? (a, b) : (b, a)
+        return diagram.edges.firstIndex { $0.points(from: src, to: dst) }
+    }
+
+    private func hasDuplicateEdge(from a: String, kind: FlowEdgeKind, to b: String) -> Bool {
+        if kind.isSymmetric {
+            return diagram.edges.contains { $0.kind.isSymmetric && $0.connects(a, b) }
+        }
+        let (src, dst) = kind == .forward ? (a, b) : (b, a)
+        return diagram.edges.contains { $0.points(from: src, to: dst) }
     }
 
     // MARK: Declarations
@@ -228,25 +254,25 @@ private struct Reader {
         let label = colon.map { Self.unquote(String(s[s.index(after: $0)...])) } ?? ""
         let enter = diagram.steps.count - 1
 
-        if head.contains("->") {
-            let ids = head.components(separatedBy: "->").map { $0.trimmingCharacters(in: .whitespaces) }
-            if ids.count >= 2, ids.allSatisfy(Self.isID) {
-                var dashed = false
-                for (key, value) in attributes {
-                    if key != "style" { fail(line, "edges take `style`, got `\(key)`") }
-                    else if value == "dashed" || value == "solid" { dashed = value == "dashed" }
-                    else { fail(line, "style must be `dashed` or `solid`") }
-                }
-                for (a, b) in zip(ids, ids.dropFirst()) {
-                    guard knownNode(a, line) != nil, knownNode(b, line) != nil else { continue }
-                    if a == b { fail(line, "`\(a)` cannot point at itself"); continue }
-                    if diagram.edges.contains(where: { $0.from == a && $0.to == b }) { fail(line, "`\(a) -> \(b)` is already declared"); continue }
-                    if diagram.edges.count >= FlowParser.maxEdges { fail(line, "a diagram can have at most \(FlowParser.maxEdges) edges"); continue }
-                    diagram.edges.append(FlowEdge(from: a, to: b, label: label, dashed: dashed, enter: enter, line: line,
-                                                  labels: label.isEmpty ? [] : [label]))
-                }
-                return
+        if let chain = Self.edgeChain(head) {
+            var dashed = false
+            for (key, value) in attributes {
+                if key != "style" { fail(line, "edges take `style`, got `\(key)`") }
+                else if value == "dashed" || value == "solid" { dashed = value == "dashed" }
+                else { fail(line, "style must be `dashed` or `solid`") }
             }
+            for (a, kind, b) in chain {
+                guard knownNode(a, line) != nil, knownNode(b, line) != nil else { continue }
+                if a == b { fail(line, "`\(a)` cannot point at itself"); continue }
+                if hasDuplicateEdge(from: a, kind: kind, to: b) {
+                    fail(line, "`\(a) \(kind.operatorSymbol) \(b)` is already declared")
+                    continue
+                }
+                if diagram.edges.count >= FlowParser.maxEdges { fail(line, "a diagram can have at most \(FlowParser.maxEdges) edges"); continue }
+                diagram.edges.append(FlowEdge(from: a, to: b, kind: kind, label: label, dashed: dashed, enter: enter, line: line,
+                                              labels: label.isEmpty ? [] : [label]))
+            }
+            return
         } else if Self.isID(head) {
             if let earlier = nodeAt[head].map({ diagram.nodes[$0].line }) ?? groupAt[head].map({ diagram.groups[$0].line }) {
                 return fail(line, "`\(head)` is already declared on line \(earlier)")
@@ -270,8 +296,11 @@ private struct Reader {
         }
 
         var hint = ""
-        if statement.contains("-->") || statement.contains("==>") || statement.contains("-.->") { hint = " Edges are written `a -> b: label`." }
-        else if statement.contains("[") || statement.contains("(") { hint = " Nodes are written `id: Label {shape: box}`." }
+        if statement.contains("-->") || statement.contains("<--") || statement.contains("==>") || statement.contains("-.->") || statement.contains("---") {
+            hint = " Edges are written `a -> b: label`."
+        } else if statement.contains("[") || statement.contains("(") {
+            hint = " Nodes are written `id: Label {shape: box}`."
+        }
         fail(line, "cannot read this line." + hint)
     }
 
@@ -290,11 +319,63 @@ private struct Reader {
         return String(s.prefix(while: isIDPart))
     }
 
-    /// `a -> b` with both sides valid ids.
+    /// `a -> b` with both sides valid ids (used by `send`).
     private static func pair(_ s: String) -> (String, String)? {
-        let parts = s.components(separatedBy: "->").map { $0.trimmingCharacters(in: .whitespaces) }
-        guard parts.count == 2, isID(parts[0]), isID(parts[1]) else { return nil }
-        return (parts[0], parts[1])
+        guard let ref = edgeRef(s), ref.kind == .forward else { return nil }
+        return (ref.from, ref.to)
+    }
+
+    /// A single edge reference using any of `->`, `<-`, `<->`, or `--`.
+    private static func edgeRef(_ s: String) -> (from: String, kind: FlowEdgeKind, to: String)? {
+        guard let chain = edgeChain(s), chain.count == 1 else { return nil }
+        return chain[0]
+    }
+
+    /// Parses `a op b (op c)*` left-to-right where each `op` is `<->`, `<-`, `->`, or `--`.
+    private static func edgeChain(_ s: String) -> [(from: String, kind: FlowEdgeKind, to: String)]? {
+        var i = s.startIndex
+        func skipSpaces() {
+            while i < s.endIndex, s[i].isWhitespace { i = s.index(after: i) }
+        }
+        func match(_ token: String) -> Bool {
+            guard s[i...].hasPrefix(token) else { return false }
+            i = s.index(i, offsetBy: token.count)
+            return true
+        }
+        func readID() -> String? {
+            guard i < s.endIndex, isIDStart(s[i]) else { return nil }
+            let start = i
+            i = s.index(after: i)
+            while i < s.endIndex, isIDPart(s[i]) {
+                if s[i] == "-" {
+                    let next = s.index(after: i)
+                    if next < s.endIndex, s[next] == ">" || s[next] == "-" { break }
+                }
+                i = s.index(after: i)
+            }
+            return String(s[start..<i])
+        }
+        func readOp() -> FlowEdgeKind? {
+            if match("<->") { return .bidirectional }
+            if match("<-") { return .backward }
+            if match("->") { return .forward }
+            if match("--") { return .undirected }
+            return nil
+        }
+
+        skipSpaces()
+        guard var current = readID() else { return nil }
+        var out: [(from: String, kind: FlowEdgeKind, to: String)] = []
+        while true {
+            skipSpaces()
+            if i == s.endIndex { break }
+            guard let kind = readOp() else { return nil }
+            skipSpaces()
+            guard let next = readID() else { return nil }
+            out.append((current, kind, next))
+            current = next
+        }
+        return out.isEmpty ? nil : out
     }
 
     /// `#` starts a comment when it begins the line or follows a space, outside quotes.

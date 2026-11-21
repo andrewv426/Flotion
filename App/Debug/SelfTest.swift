@@ -78,7 +78,8 @@ enum SelfTest {
                         (n.dataset.tone ?? null) === (s.tone ?? null);
                     }) && step.edges.every((s, k) =>
                       edges[k].classList.contains('off') === !s.on && edges[k].classList.contains('dim') === s.dim &&
-                      edges[k].classList.contains('at-hi') === s.hi && labels[k].textContent === s.label && (s.live ? lit(k) : unlit(k)));
+                      ['hi', 'lo', 'both', 'none'].every(h => edges[k].classList.contains('at-' + h) === (s.heads === h)) &&
+                      labels[k].textContent === s.label && (s.live ? lit(k) : unlit(k)));
                   };
                   const initial = matches(0);
                   window.flotion.go(1);
@@ -183,6 +184,61 @@ enum SelfTest {
                 }
             }
         }
+    }
+
+    /// Verifies forward, backward, bidirectional and undirected edges render their `.at-*` classes,
+    /// point along an active `send`, and revert on the next step.
+    private static func checkFlowEdgeTypes(web: WKWebView, check: (Bool, String) -> Void) async {
+        let source = """
+            flow right
+            a: Alpha
+            b: Beta
+            c: Gamma
+            d: Delta
+            e: Epsilon
+            a -> b <- c <-> d -- e
+            step "Resting"
+            step "Send"
+              send a -> b: fwd
+              send b -> c: bwd
+              send c -> d: bi
+              send e -> d: link
+            step "Reverted"
+            """
+        guard let scene = try? FlowScene(source: source) else {
+            check(false, "the edge-types fixture parses")
+            return
+        }
+        let originalFrame = web.frame
+        web.setFrameSize(NSSize(width: 720, height: scene.displayHeight(forWidth: 720)))
+        defer { web.frame = originalFrame }
+        let marker = "window.flowEdgeTypesReady = true;\n"
+        let html = DiagramTemplate.flowDocument(scene).replacingOccurrences(of: "<script>", with: "<script>" + marker)
+        web.loadHTMLString(html, baseURL: nil)
+        for _ in 0..<100 {
+            if (try? await web.evaluateJavaScript("window.flowEdgeTypesReady === true && !!window.flotion") as? Bool) == true { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        let ok = try? await web.evaluateJavaScript("""
+            (() => {
+              const edges = [...document.querySelectorAll('.edge')];
+              const states = () => edges.map(e => ['hi', 'lo', 'both', 'none'].filter(h => e.classList.contains('at-' + h)).join(','));
+              const shapes = edges.length === 4 && edges.every(e =>
+                e.querySelectorAll('.direction').length === 4 &&
+                e.querySelectorAll('.direction.hi .head').length === 1 &&
+                e.querySelectorAll('.direction.lo .head').length === 1 &&
+                e.querySelectorAll('.direction.both .head').length === 2 &&
+                e.querySelectorAll('.direction.none .head').length === 0
+              );
+              const resting = states().join('|') === 'hi|lo|both|none';
+              window.flotion.go(1);
+              const sending = states().join('|') === 'hi|hi|hi|lo';
+              window.flotion.go(2);
+              const reverted = states().join('|') === 'hi|lo|both|none';
+              return shapes && resting && sending && reverted;
+            })()
+            """) as? Bool
+        check(ok == true, "all four Flow edge types render their .at-* states, override during send and revert")
     }
 
     static func run(model: AppModel, output: URL) async {
@@ -543,6 +599,7 @@ enum SelfTest {
                     check(false, "the player is hosted in the editor table")
                 }
                 await checkFlowSequence(web: web, output: output, check: check)
+                await checkFlowEdgeTypes(web: web, check: check)
                 if let scene = try? FlowScene(source: source) {
                     web.loadHTMLString(DiagramTemplate.flowDocument(scene), baseURL: nil)
                     await pause(300)
