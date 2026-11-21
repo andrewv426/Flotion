@@ -229,7 +229,7 @@ struct ConnectCard: View {
                 } else {
                     Button("Sign in…") { ai.openSignIn(service) }
                 }
-                Button("Check again") { Task { await ai.refreshStatus() } }
+                Button("Check again") { Task { await ai.refreshStatus(force: true) } }
             }
             .font(.system(size: 12))
         }

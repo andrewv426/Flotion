@@ -850,8 +850,17 @@ enum SelfTest {
                 ai.selectModel(model.id)
                 check(ai.selectedModel == model, "a discovered model can be selected")
                 let restored = AIController(workspace: ai.workspace)
+                check(restored.selectedModel == model && restored.visibleModels.contains(model),
+                      "cached discovered models load immediately on relaunch before refreshing")
                 await restored.refreshStatus()
                 check(restored.selectedModel == model, "the discovered model selection survives relaunch")
+                restored.applyInspection(AccountInspection(status: nil, models: nil), for: model.service)
+                check(restored.statuses[model.service] == .ready(plan: "test") && restored.failedStatusChecks.contains(model.service)
+                      && restored.visibleModels.contains(model) && restored.selectedModel == model,
+                      "a transient status failure preserves provider status, cached models, and selection")
+                restored.applyInspection(AccountInspection(status: .ready(plan: nil), models: nil), for: model.service)
+                check(restored.visibleModels.contains(model) && restored.selectedModel == model,
+                      "a failed catalog fetch preserves previously cached models and selection")
                 ai.setEnabled(false, for: model)
                 await ai.refreshStatus()
                 check(!ai.visibleModels.contains(model), "refreshing keeps a discovered model hidden")
@@ -911,6 +920,8 @@ enum SelfTest {
             let defaults = AppDefaults.store
             defaults.set(Data(#"[{"service":"openAI","alias":"saved-custom","name":"Saved model"},{"service":"gemini","alias":"gemini-3.5-flash","name":"Old Gemini"}]"#.utf8),
                          forKey: "assistantCustomModels")
+            defaults.set(Data(#"{"gemini":[{"service":"gemini","alias":"gemini-3.5-flash","name":"Old Gemini"}],"antigravity":[{"service":"antigravity","alias":"agy-cached","name":"Cached Antigravity"}]}"#.utf8),
+                         forKey: "assistantCachedCatalogs")
             defaults.set(["gemini:gemini-3.5-flash", "openAI:saved-custom"], forKey: "assistantEnabledModels")
             defaults.set("gemini:gemini-3.5-flash", forKey: "assistantModel")
             let migrated = AIController(workspace: workspace)
@@ -920,6 +931,8 @@ enum SelfTest {
                   "migrating Gemini preserves custom models for other providers")
             check(!migrated.allModels.contains { $0.alias == "gemini-3.5-flash" },
                   "obsolete Gemini CLI IDs are removed from the picker")
+            check(migrated.allModels.contains { $0.id == "antigravity:agy-cached" },
+                  "migrating cached catalogs drops legacy Gemini entries while keeping valid providers")
         }
 
         if TestHost.focusTakenCount > 0 {

@@ -75,7 +75,7 @@ private struct ProviderSettings: View {
                 } else if ai.statuses[service] != nil {
                     Button("Sign in to \(service.label)…") { ai.openSignIn(service) }
                 }
-                Button("Check again") { Task { await ai.refreshStatus() } }
+                Button("Check again") { Task { await ai.refreshStatus(force: true) } }
             }
 
             if service != .claude, case .ready = ai.statuses[service] {
@@ -123,7 +123,7 @@ private struct ProviderSettings: View {
             plan.map { "Signed in (\($0.capitalized) plan)" } ?? "Signed in"
         case .signedOut: "Signed out"
         case .notInstalled: "\(service.cliName) not found"
-        case nil: "Checking…"
+        case nil: ai.failedStatusChecks.contains(service) ? "Couldn’t check. Try again." : "Checking…"
         }
     }
 

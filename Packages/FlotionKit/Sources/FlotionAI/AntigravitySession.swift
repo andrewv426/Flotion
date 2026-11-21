@@ -1,10 +1,5 @@
 import Foundation
 
-struct AntigravityAccountSnapshot: Sendable {
-    let status: AIProviderStatus
-    let models: [AccountModel]?
-}
-
 /// Antigravity's editor protocol supplies account models, streaming replies, and scoped MCP access.
 struct AntigravitySession {
     static let arguments = ["acp", "--include-default-customizations=false", "--sandbox"]
@@ -23,35 +18,40 @@ struct AntigravitySession {
         lines = process.lines().makeAsyncIterator()
     }
 
-    static func inspect(_ command: AICommand) async -> AntigravityAccountSnapshot {
-        await withTaskGroup(of: AntigravityAccountSnapshot.self) { group in
+    static func inspect(_ command: AICommand, timeout: Duration = .seconds(15)) async -> AccountInspection {
+        guard !Task.isCancelled else { return AccountInspection(status: nil, models: nil) }
+        return await withTaskGroup(of: AccountInspection.self) { group in
             group.addTask {
                 do {
+                    try Task.checkCancellation()
                     var session = try AntigravitySession(command)
                     defer { session.process.terminate() }
                     let setup = try await session.open(directory: command.directory, tools: .none)
                     guard let models = setup["models"] as? [String: Any],
                           let entries = models["availableModels"] as? [[String: Any]] else {
-                        return AntigravityAccountSnapshot(status: .ready(plan: nil), models: nil)
+                        return AccountInspection(status: .ready(plan: nil), models: nil)
                     }
                     let catalog = entries.compactMap { entry -> AccountModel? in
                         guard let id = entry["modelId"] as? String, !id.isEmpty else { return nil }
                         return AccountModel(id: id, name: entry["name"] as? String ?? id)
                     }
-                    return AntigravityAccountSnapshot(status: .ready(plan: nil), models: catalog)
+                    return AccountInspection(status: .ready(plan: nil), models: catalog)
+                } catch is CancellationError {
+                    return AccountInspection(status: nil, models: nil)
                 } catch let error as SessionError {
-                    return AntigravityAccountSnapshot(status: error.isAuthentication ? .signedOut : .notInstalled, models: nil)
+                    return AccountInspection(status: error.isAuthentication ? .signedOut : nil, models: nil)
                 } catch {
-                    return AntigravityAccountSnapshot(status: .notInstalled, models: nil)
+                    let missing = !FileManager.default.isExecutableFile(atPath: command.executable.path)
+                    return AccountInspection(status: missing ? .notInstalled : nil, models: nil)
                 }
             }
             group.addTask {
-                try? await Task.sleep(for: .seconds(15))
-                return AntigravityAccountSnapshot(status: .signedOut, models: nil)
+                try? await Task.sleep(for: timeout)
+                return AccountInspection(status: nil, models: nil)
             }
             let result = await group.next()
             group.cancelAll()
-            return result ?? AntigravityAccountSnapshot(status: .signedOut, models: nil)
+            return result ?? AccountInspection(status: nil, models: nil)
         }
     }
 
@@ -140,6 +140,7 @@ struct AntigravitySession {
             }
             return result
         }
+        try Task.checkCancellation()
         throw SessionError(code: 0, message: "Antigravity disconnected before completing the request.")
     }
 

@@ -64,27 +64,26 @@ public enum ClaudeCLI {
         return .ready(plan: object["subscriptionType"] as? String)
     }
 
-    public static func status(executable: URL?) async -> AIProviderStatus {
+    public static func probeStatus(executable: URL?, timeout: Duration = .seconds(15)) async -> AIProviderStatus? {
         guard let executable else { return .notInstalled }
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                let pipe = Pipe()
-                process.executableURL = executable
-                process.arguments = ["auth", "status", "--json"]
-                process.environment = childEnvironment()
-                process.standardInput = FileHandle.nullDevice
-                process.standardOutput = pipe
-                process.standardError = FileHandle.nullDevice
-                do {
-                    try process.run()
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    process.waitUntilExit()
-                    continuation.resume(returning: parseStatus(data))
-                } catch {
-                    continuation.resume(returning: .notInstalled)
-                }
-            }
+        let result = await ProcessProbe.run(
+            executable: executable,
+            arguments: ["auth", "status", "--json"],
+            environment: childEnvironment(),
+            includeStandardError: false,
+            timeout: timeout
+        )
+        switch result {
+        case .exited(_, let data):
+            return parseStatus(data)
+        case .launchFailed(let executableMissing):
+            return executableMissing ? .notInstalled : nil
+        case .timedOutOrCancelled:
+            return nil
         }
+    }
+
+    public static func status(executable: URL?, timeout: Duration = .seconds(15)) async -> AIProviderStatus {
+        await probeStatus(executable: executable, timeout: timeout) ?? .signedOut
     }
 }

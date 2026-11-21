@@ -86,6 +86,8 @@ public struct AIRequest: Sendable, Equatable {
 public protocol AIProvider: Sendable {
     var supportsWorkspaceTools: Bool { get }
     func status() async -> AIProviderStatus
+    /// Checks provider status, returning `nil` on transient failure or timeout rather than guessing.
+    func probeStatus() async -> AIProviderStatus?
     /// Runs one request. The stream always ends with `.finished`; cancel by dropping it.
     func run(_ request: AIRequest) -> AsyncStream<AIEvent>
     /// Starts a process for an upcoming request of the same shape so it answers sooner.
@@ -94,6 +96,7 @@ public protocol AIProvider: Sendable {
 
 public extension AIProvider {
     var supportsWorkspaceTools: Bool { false }
+    func probeStatus() async -> AIProviderStatus? { await status() }
     func prewarm(_ request: AIRequest) {}
 }
 

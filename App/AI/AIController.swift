@@ -19,13 +19,24 @@ final class AIController {
     @ObservationIgnored private let usesFakeProviders: Bool
     @ObservationIgnored private var providers: [AssistantService: any AIProvider] = [:]
     @ObservationIgnored private let scratch: URL
-    @ObservationIgnored private var statusRefresh = UUID()
+    @ObservationIgnored private var refreshTask: Task<Void, Never>?
+    @ObservationIgnored private var refreshToken = UUID()
+    @ObservationIgnored private var lastRefreshCompletedAt: ContinuousClock.Instant?
     @ObservationIgnored private var configuredModel: AssistantModel?
     @ObservationIgnored private var knownCatalogIDs: Set<String>
+    private static let refreshCooldown: Duration = .seconds(45)
+
+    private struct CachedModel: Decodable {
+        let service: String
+        let alias: String
+        let name: String
+    }
 
     private(set) var statuses: [AssistantService: AIProviderStatus] = [:]
     private(set) var modelCatalogs: [AssistantService: [AssistantModel]] = [:]
     private(set) var loadingModelCatalogs: Set<AssistantService> = []
+    /// Providers whose last status check timed out or failed before reporting a state.
+    private(set) var failedStatusChecks: Set<AssistantService> = []
     private(set) var enabledIDs: Set<String>
     private(set) var customModels: [AssistantModel]
     private(set) var selectedModelID: String
@@ -83,11 +94,29 @@ final class AIController {
            !(AssistantModel.suggested + models).contains(where: { $0.id == legacy.id }) {
             models.append(legacy)
         }
-        let allModels = AssistantModel.suggested + models
+        let cachedCatalogs: [AssistantService: [AssistantModel]] = {
+            guard let data = defaults.data(forKey: "assistantCachedCatalogs"),
+                  let decoded = try? JSONDecoder().decode([String: [CachedModel]].self, from: data) else { return [:] }
+            var catalogs: [AssistantService: [AssistantModel]] = [:]
+            for (key, entries) in decoded {
+                guard let service = AssistantService(rawValue: key) else { continue }
+                var seen = Set<String>()
+                catalogs[service] = entries.compactMap { entry in
+                    guard entry.service == key, !entry.alias.isEmpty else { return nil }
+                    let item = AssistantModel(service: service, alias: entry.alias,
+                                              name: entry.name.isEmpty ? entry.alias : entry.name)
+                    return seen.insert(item.id).inserted ? item : nil
+                }
+            }
+            return catalogs
+        }()
+        let discovered = AssistantService.allCases.flatMap { cachedCatalogs[$0] ?? [] }
+        let allModels = AssistantModel.suggested + models + discovered
         let enabled = Set((defaults.stringArray(forKey: "assistantEnabledModels") ?? allModels.filter { $0.service == .claude }.map(\.id)).map(migratedID))
         let visible = allModels.filter { enabled.contains($0.id) }
         let initialID = enabled.contains(previousID) ? previousID : (visible.first ?? .claudeDefault).id
         knownCatalogIDs = Set((defaults.stringArray(forKey: "assistantKnownCatalogIDs") ?? []).filter { !$0.hasPrefix("gemini:") })
+        modelCatalogs = cachedCatalogs
         customModels = models
         enabledIDs = enabled.isEmpty ? [initialID] : enabled
         selectedModelID = initialID
@@ -104,7 +133,44 @@ final class AIController {
         persistModels()
     }
 
-    func refreshStatus() async {
+    func refreshStatus(force: Bool = false) async {
+        if !force {
+            if let task = refreshTask {
+                await task.value
+                return
+            }
+            if !usesFakeProviders,
+               let last = lastRefreshCompletedAt,
+               last.duration(to: ContinuousClock().now) < Self.refreshCooldown {
+                return
+            }
+        } else {
+            refreshTask?.cancel()
+            refreshTask = nil
+            if !loadingModelCatalogs.isEmpty {
+                loadingModelCatalogs.removeAll()
+            }
+        }
+
+        let token = UUID()
+        refreshToken = token
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performRefresh(token: token)
+        }
+        refreshTask = task
+        await task.value
+    }
+
+    private func performRefresh(token: UUID) async {
+        defer {
+            if refreshToken == token {
+                refreshTask = nil
+                if !Task.isCancelled {
+                    lastRefreshCompletedAt = ContinuousClock().now
+                }
+            }
+        }
         if !usesFakeProviders && !chat.isRunning {
             let claude = ClaudeCLI.locate()
             if (providers[.claude] as? ClaudeCodeProvider)?.executable != claude {
@@ -118,63 +184,152 @@ final class AIController {
                 }
             }
         }
-        let refresh = UUID()
-        statusRefresh = refresh
-        let updated = await withTaskGroup(of: (AssistantService, AIProviderStatus).self) { group in
-            for (service, provider) in providers {
-                group.addTask { (service, await provider.status()) }
-            }
-            var values: [AssistantService: AIProviderStatus] = [:]
-            for await (service, status) in group { values[service] = status }
-            return values
-        }
-        guard refresh == statusRefresh, !Task.isCancelled else { return }
-        statuses = updated
-        prewarm()
 
+        let snapshot = providers
         if usesFakeProviders {
+            await withTaskGroup(of: (AssistantService, AIProviderStatus?).self) { group in
+                for (service, provider) in snapshot {
+                    group.addTask { (service, await provider.probeStatus()) }
+                }
+                for await (service, status) in group {
+                    guard refreshToken == token, !Task.isCancelled else { return }
+                    if let status { setStatus(status, for: service) }
+                }
+            }
+            guard refreshToken == token, !Task.isCancelled else { return }
+            prewarm()
             applyCatalog([AccountModel(id: "codex-test", name: "Codex Test")], for: .openAI)
             applyCatalog([AccountModel(id: "agy-test", name: "Antigravity Test")], for: .antigravity)
             return
         }
-        let catalogs = providers.compactMapValues { $0 as? AccountCLIProvider }
-            .filter { service, _ in
-                if case .ready = updated[service] { return true }
-                return false
-            }
-        let previousModel = selectedModel
-        modelCatalogs = modelCatalogs.filter { catalogs[$0.key] != nil }
-        if selectedModel != previousModel { selectCurrentProvider() }
-        loadingModelCatalogs = Set(catalogs.keys)
-        defer { if refresh == statusRefresh { loadingModelCatalogs.removeAll() } }
-        await withTaskGroup(of: (AssistantService, [AccountModel]?).self) { group in
-            for (service, provider) in catalogs {
-                group.addTask { (service, await provider.availableModels()) }
-            }
-            for await (service, models) in group {
-                guard refresh == statusRefresh, !Task.isCancelled else { return }
-                applyCatalog(models, for: service)
-                loadingModelCatalogs.remove(service)
+
+        await withTaskGroup(of: Void.self) { group in
+            for (service, provider) in snapshot {
+                group.addTask { [weak self] in
+                    guard let self else { return }
+                    await self.refreshProvider(service: service, provider: provider, token: token)
+                }
             }
         }
     }
 
-    private func applyCatalog(_ models: [AccountModel]?, for service: AssistantService) {
+    private func refreshProvider(service: AssistantService, provider: any AIProvider, token: UUID) async {
+        defer {
+            if refreshToken == token {
+                setLoadingCatalog(false, for: service)
+            }
+        }
+        if let account = provider as? AccountCLIProvider {
+            if account.cli == .agy {
+                if statuses[service] != nil && modelCatalogs[service] == nil {
+                    setLoadingCatalog(true, for: service)
+                }
+                let inspection = await account.inspect()
+                guard refreshToken == token, !Task.isCancelled else { return }
+                applyInspection(inspection, for: service)
+                return
+            }
+            let status = await account.probeStatus()
+            guard refreshToken == token, !Task.isCancelled else { return }
+            guard let status else { return markStatusCheckFailed(for: service) }
+            setStatus(status, for: service)
+            guard case .ready = status else {
+                clearCatalog(for: service)
+                return
+            }
+            if selectedModel.service == service { prewarm() }
+            if modelCatalogs[service] == nil {
+                setLoadingCatalog(true, for: service)
+            }
+            let models = await account.availableModels()
+            guard refreshToken == token, !Task.isCancelled else { return }
+            applyCatalog(models, for: service)
+            return
+        }
+
+        let status = await provider.probeStatus()
+        guard refreshToken == token, !Task.isCancelled else { return }
+        guard let status else { return markStatusCheckFailed(for: service) }
+        setStatus(status, for: service)
+        if case .ready = status, selectedModel.service == service {
+            prewarm()
+        }
+    }
+
+    /// Applies one provider inspection. A missing status is transient: the last known status and catalog stay.
+    func applyInspection(_ inspection: AccountInspection, for service: AssistantService) {
+        guard let status = inspection.status else { return markStatusCheckFailed(for: service) }
+        setStatus(status, for: service)
+        guard case .ready = status else {
+            clearCatalog(for: service)
+            return
+        }
+        applyCatalog(inspection.models, for: service)
+        if selectedModel.service == service { prewarm() }
+    }
+
+    /// Replaces a provider's discovered models. `nil` means the fetch failed, so the cached catalog stays.
+    func applyCatalog(_ models: [AccountModel]?, for service: AssistantService) {
+        guard let models else { return }
         let previousModel = selectedModel
         let existingIDs = Set((AssistantModel.suggested + customModels).map(\.id))
-        let discovered = models?.filter { !$0.id.isEmpty }
-            .map { AssistantModel(service: service, alias: $0.id, name: $0.name) }
-        modelCatalogs[service] = discovered
-        for model in discovered ?? [] where knownCatalogIDs.insert(model.id).inserted {
-            if !existingIDs.contains(model.id) { enabledIDs.insert(model.id) }
+        var seen = Set<String>()
+        let discovered = models.compactMap { model -> AssistantModel? in
+            guard !model.id.isEmpty else { return nil }
+            let item = AssistantModel(service: service, alias: model.id, name: model.name)
+            return seen.insert(item.id).inserted ? item : nil
         }
+        let catalogChanged = modelCatalogs[service] != discovered
+        if catalogChanged {
+            modelCatalogs[service] = discovered
+        }
+        var updatedEnabled = enabledIDs
+        var knownChanged = false
+        for model in discovered where knownCatalogIDs.insert(model.id).inserted {
+            knownChanged = true
+            if !existingIDs.contains(model.id) { updatedEnabled.insert(model.id) }
+        }
+        let enabledChanged = updatedEnabled != enabledIDs
+        if enabledChanged {
+            enabledIDs = updatedEnabled
+        }
+        if catalogChanged || enabledChanged || knownChanged {
+            persistModels()
+        }
+        if selectedModel != previousModel { selectCurrentProvider() }
+    }
+
+    private func clearCatalog(for service: AssistantService) {
+        guard modelCatalogs[service] != nil else { return }
+        let previousModel = selectedModel
+        modelCatalogs.removeValue(forKey: service)
         persistModels()
         if selectedModel != previousModel { selectCurrentProvider() }
     }
 
+    private func setStatus(_ status: AIProviderStatus, for service: AssistantService) {
+        if failedStatusChecks.contains(service) { failedStatusChecks.remove(service) }
+        guard statuses[service] != status else { return }
+        statuses[service] = status
+    }
+
+    private func markStatusCheckFailed(for service: AssistantService) {
+        if !failedStatusChecks.contains(service) { failedStatusChecks.insert(service) }
+    }
+
+    private func setLoadingCatalog(_ loading: Bool, for service: AssistantService) {
+        if loading {
+            guard !loadingModelCatalogs.contains(service) else { return }
+            loadingModelCatalogs.insert(service)
+        } else {
+            guard loadingModelCatalogs.contains(service) else { return }
+            loadingModelCatalogs.remove(service)
+        }
+    }
+
     func selectModel(_ id: String) {
         guard !chat.isRunning, id != selectedModelID, visibleModels.contains(where: { $0.id == id }) else { return }
-        enabledIDs.insert(id)
+        if !enabledIDs.contains(id) { enabledIDs.insert(id) }
         selectedModelID = id
         selectCurrentProvider()
         persistModels()
@@ -183,9 +338,10 @@ final class AIController {
     func setEnabled(_ enabled: Bool, for model: AssistantModel) {
         guard !chat.isRunning else { return }
         if enabled {
+            guard !enabledIDs.contains(model.id) else { return }
             enabledIDs.insert(model.id)
         } else {
-            guard !enabledIDs.contains(model.id) || visibleModels.count > 1 else { return }
+            guard enabledIDs.contains(model.id), visibleModels.count > 1 else { return }
             enabledIDs.remove(model.id)
             if model.id == selectedModelID, let first = visibleModels.first { selectModel(first.id) }
         }
@@ -215,6 +371,8 @@ final class AIController {
         defaults.set(Array(knownCatalogIDs).sorted(), forKey: "assistantKnownCatalogIDs")
         defaults.set(selectedModelID, forKey: "assistantModel")
         defaults.set(try? JSONEncoder().encode(customModels), forKey: "assistantCustomModels")
+        let catalogs = Dictionary(uniqueKeysWithValues: modelCatalogs.map { ($0.key.rawValue, $0.value) })
+        defaults.set(try? JSONEncoder().encode(catalogs), forKey: "assistantCachedCatalogs")
     }
 
     private func selectCurrentProvider() {
@@ -272,6 +430,7 @@ final class AIController {
             try body.write(to: script, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
             NSWorkspace.shared.open(script)
+            lastRefreshCompletedAt = nil
         } catch {
             NSSound.beep()
         }

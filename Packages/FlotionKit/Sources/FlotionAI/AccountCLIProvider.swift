@@ -57,36 +57,37 @@ public struct AccountCLIProvider: AIProvider {
 
     var label: String { cli == .codex ? "ChatGPT" : "Antigravity" }
 
-    public func status() async -> AIProviderStatus {
+    public func probeStatus() async -> AIProviderStatus? {
+        await probeStatus(timeout: .seconds(15))
+    }
+
+    public func probeStatus(timeout: Duration) async -> AIProviderStatus? {
         guard let executable else { return .notInstalled }
         if cli == .agy {
-            do {
-                try prepareDirectory()
-                return await AntigravitySession.inspect(command(executable, AntigravitySession.arguments)).status
-            } catch {
-                return .notInstalled
-            }
+            return await inspect(timeout: timeout).status
         }
-        return await Task.detached {
-            let process = Process()
-            let output = Pipe()
-            process.executableURL = executable
-            process.arguments = ["login", "status"]
-            process.environment = AICommand.loginEnvironment(executable: executable)
-            process.currentDirectoryURL = FileManager.default.temporaryDirectory
-            process.standardInput = FileHandle.nullDevice
-            process.standardOutput = output
-            process.standardError = output
-            do {
-                try process.run()
-                let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-                process.waitUntilExit()
-                let signedIn = process.terminationStatus == 0 && text.split(whereSeparator: \.isNewline).contains("Logged in using ChatGPT")
-                return signedIn ? AIProviderStatus.ready(plan: nil) : .signedOut
-            } catch {
-                return .notInstalled
-            }
-        }.value
+        let result = await ProcessProbe.run(
+            executable: executable,
+            arguments: ["login", "status"],
+            directory: FileManager.default.temporaryDirectory,
+            environment: AICommand.loginEnvironment(executable: executable),
+            includeStandardError: true,
+            timeout: timeout
+        )
+        switch result {
+        case .exited(let status, let data):
+            let text = String(decoding: data, as: UTF8.self)
+            let signedIn = status == 0 && text.split(whereSeparator: \.isNewline).contains("Logged in using ChatGPT")
+            return signedIn ? .ready(plan: nil) : .signedOut
+        case .launchFailed(let executableMissing):
+            return executableMissing ? .notInstalled : nil
+        case .timedOutOrCancelled:
+            return nil
+        }
+    }
+
+    public func status() async -> AIProviderStatus {
+        await probeStatus() ?? .signedOut
     }
 
     public func signInCommand() throws -> AICommand? {

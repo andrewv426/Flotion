@@ -119,6 +119,29 @@ import Testing
         ])
     }
 
+    @Test func codexStatusProbeRespectsTimeoutAndCancellation() async throws {
+        let folder = try directory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let sleeping = try stub(in: folder, script: "exec /bin/sleep 30")
+        let stalled = AccountCLIProvider(.codex, executable: sleeping, directory: folder)
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        #expect(await stalled.probeStatus(timeout: .milliseconds(120)) == nil)
+        #expect(start.duration(to: clock.now) < .seconds(5))
+
+        let inspectStart = clock.now
+        #expect(await stalled.inspect(timeout: .milliseconds(120)) == AccountInspection(status: nil, models: nil))
+        #expect(inspectStart.duration(to: clock.now) < .seconds(5))
+
+        let cancelStart = clock.now
+        let task = Task { await stalled.probeStatus() }
+        try await Task.sleep(for: .milliseconds(50))
+        task.cancel()
+        #expect(await task.value == nil)
+        #expect(cancelStart.duration(to: clock.now) < .seconds(5))
+    }
+
     @Test func terminalErrorsAndInterruptedStreamsFail() {
         var codex = AccountCLIStream(cli: .codex, model: "")
         _ = codex.consume(Data(#"{"type":"turn.failed","error":{"message":"401 Unauthorized"}}"#.utf8))

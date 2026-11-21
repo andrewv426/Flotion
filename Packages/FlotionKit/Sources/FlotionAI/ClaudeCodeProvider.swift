@@ -22,6 +22,10 @@ public final class ClaudeCodeProvider: AIProvider, @unchecked Sendable {
         await ClaudeCLI.status(executable: executable)
     }
 
+    public func probeStatus() async -> AIProviderStatus? {
+        await ClaudeCLI.probeStatus(executable: executable)
+    }
+
     private func launch(_ arguments: [String]) throws -> AIProcess {
         guard let executable else { throw CocoaError(.fileNoSuchFile) }
         return try AIProcess(executable: executable, arguments: arguments, workingDirectory: workingDirectory,
